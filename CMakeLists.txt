@@ -36,6 +36,8 @@ juce_add_binary_data(
         LDSJvst_BinaryData
         SOURCES
         assets/TV.png
+        assets/BYPASS.png
+        assets/remote_control.png
 )
 
 target_compile_definitions(LDSJvst

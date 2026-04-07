@@ -189,8 +189,6 @@ private:
         void mouseUp (const juce::MouseEvent& e) override;
 
         int remotePressedButtonIndex = -1;
-        double remotePressedStartSeconds = 0.0;
-        static constexpr double remotePressedDurationSeconds = 0.11;
 
         LDSJvstAudioProcessorEditor& owner;
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RemoteControlOverlay)

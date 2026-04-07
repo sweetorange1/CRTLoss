@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 #include <JuceHeader.h>
 #include "BinaryData.h"
+#include <cstring>
 
 // --- BypassHitArea ---
 void LDSJvstAudioProcessorEditor::BypassHitArea::paint (juce::Graphics& g)
@@ -228,7 +229,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             else        pixelWave.lineTo(x, y);
         }
 
-        g.setColour(juce::Colours::black.withAlpha(0.70f));
+        g.setColour(juce::Colours::black.withAlpha(0.7f));
         g.strokePath(pixelWave, juce::PathStrokeType(4.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
 
         g.setColour(neonGreen.withAlpha(1.0f));
@@ -1019,20 +1020,8 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::timerCallback()
         needRepaint = true;
     }
 
-    // 2) 遥控器 bypass 按下态（短暂黑色遮罩）
-    if (remotePressedButtonIndex >= 0)
-    {
-        const double dt = now - remotePressedStartSeconds;
-        if (dt >= remotePressedDurationSeconds)
-        {
-            remotePressedButtonIndex = -1;
-            needRepaint = true;
-        }
-        else
-        {
-            stillNeeded = true;
-        }
-    }
+    // 2) 遥控器按下态：不需要持续刷新（mouseDown/mouseUp 会触发 repaint）
+    // 这里不做额外处理，避免按住时因为持续 repaint 造成“闪烁感”。
 
     if (needRepaint)
         repaint();
@@ -1112,7 +1101,7 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::paint (juce::Graphics& g
             b.w * scale,
             b.h * scale
         );
-        g.setColour(juce::Colours::black.withAlpha(0.70f));
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
         g.fillRect(btn);
     }
 }
@@ -1162,8 +1151,8 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseDown (const juce::M
         { "VOL+",    305 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
         { "VOL-",    305 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
 
-        { "未命名按钮1", 350 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
-        { "未命名按钮2", 350 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
+        { "频道增加", 350 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
+        { "频道减少", 350 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
     };
 
     for (int i = 0; i < (int) std::size(buttons); ++i)
@@ -1179,7 +1168,6 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseDown (const juce::M
         if (r.contains(p))
         {
             remotePressedButtonIndex = i;
-            remotePressedStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
             beginAnimation();
             repaint();
             return;
@@ -1232,28 +1220,55 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
         { "VOL+",    305 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
         { "VOL-",    305 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
 
-        { "未命名按钮1", 350 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
-        { "未命名按钮2", 350 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
+        { "频道增加", 350 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
+        { "频道减少", 350 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
     };
 
-    // 遥控器 BYPASS：保持既有逻辑（mouseDown 进入按下态，mouseUp 在按钮内则触发）
+    // 遥控器：松手触发（release-to-trigger）
+    // - mouseDown 只进入“按下态”
+    // - mouseUp 时，如果仍然在同一个按钮区域内才触发（与主界面一致）
     if (owner.remotePulledOut && remotePressedButtonIndex >= 0)
     {
         const int idx = juce::jlimit(0, (int) (std::size(buttons) - 1), remotePressedButtonIndex);
         const auto& b = buttons[idx];
-        if (b.isBypass)
-        {
-            const auto btn = juce::Rectangle<float>(
-                x + b.offsetX * scale,
-                y + b.offsetY * scale,
-                b.w * scale,
-                b.h * scale
-            );
 
-            if (btn.contains(p))
+        const auto btn = juce::Rectangle<float>(
+            x + b.offsetX * scale,
+            y + b.offsetY * scale,
+            b.w * scale,
+            b.h * scale
+        );
+
+        const bool releasedOnSameButton = btn.contains(p);
+
+        // 松手后先清掉“按下态”
+        remotePressedButtonIndex = -1;
+        repaint();
+
+        if (releasedOnSameButton)
+        {
+            // BYPASS：逻辑与主界面一致
+            if (b.isBypass)
+            {
                 owner.toggleBypassFromUI();
-            return;
+            }
+            // 频道增加：预设切换到下一个（边界循环）
+            else if (std::strcmp (b.name, "频道增加") == 0)
+            {
+                const int cur = owner.getSelectedPresetIndex();
+                const int next = (cur + 1) % presetCount;
+                owner.setSelectedPresetIndex(next);
+            }
+            // 频道减少：预设切换到上一个（边界循环）
+            else if (std::strcmp (b.name, "频道减少") == 0)
+            {
+                const int cur = owner.getSelectedPresetIndex();
+                const int prev = (cur + presetCount - 1) % presetCount;
+                owner.setSelectedPresetIndex(prev);
+            }
         }
+
+        return;
     }
 
     const bool hitRemote = r.contains(p);

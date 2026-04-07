@@ -32,6 +32,12 @@ juce_add_plugin(
 
 juce_generate_juce_header(LDSJvst)
 
+juce_add_binary_data(
+        LDSJvst_BinaryData
+        SOURCES
+        assets/TV.png
+)
+
 target_compile_definitions(LDSJvst
   PUBLIC
     JUCE_VST3_CAN_REPLACE_VST2=0
@@ -44,4 +50,4 @@ target_sources(LDSJvst PRIVATE
   PluginEditor.h
 )
 
-target_link_libraries(LDSJvst PRIVATE grid::grid_plugin juce::juce_audio_utils)
+target_link_libraries(LDSJvst PRIVATE grid::grid_plugin juce::juce_audio_utils LDSJvst_BinaryData)

@@ -812,7 +812,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                         preset8Trail.clear();
                     preset8TrailLastSec = nowSec;
 
-                    constexpr double trailSec = 0.30;
+                    constexpr double trailSec = 0.32;
                     constexpr int maxItems = 40;
 
                     juce::Random rng ((int) juce::Time::getMillisecondCounter());

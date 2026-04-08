@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
+#include <vector>
+#include <deque>
 
 class LDSJvstAudioProcessorEditor : public juce::AudioProcessorEditor
 {
@@ -153,6 +155,36 @@ private:
         LDSJvstAudioProcessorEditor& owner;
         LDSJvstAudioProcessor& processor;
         juce::Array<float> samples;
+
+        // 屏幕离屏缓冲：用于做“按行 remap”的电视机行同步噪声扭曲
+        juce::Image screenBase;
+        juce::Image screenWarp;
+        int screenBufferW = 0;
+        int screenBufferH = 0;
+
+        // 扫描行噪声（每行一个偏移），带窗口平均 + 时间平滑
+        std::vector<float> scanlineNoiseRaw;
+        std::vector<float> scanlineNoiseSmoothed;
+        std::vector<float> scanlineOffsetPx;
+
+        // 预设 3：视觉暂留（把上一帧内容衰减并向右平移，形成拖影）
+        juce::Image preset3TrailA;
+        juce::Image preset3TrailB;
+        bool preset3TrailFlip = false;
+        double preset3TrailLastSec = 0.0;
+
+        struct Preset3TrailItem
+        {
+            juce::Path path;
+            double tSec = 0.0;
+        };
+        std::deque<Preset3TrailItem> preset3Trail;
+
+        // 预设 8 / 10：同款拖影（时间窗内逐渐变黑），但不移动
+        double preset8TrailLastSec = 0.0;
+        std::deque<Preset3TrailItem> preset8Trail;
+        double preset10TrailLastSec = 0.0;
+        std::deque<Preset3TrailItem> preset10Trail;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OscilloscopeComponent)
     };

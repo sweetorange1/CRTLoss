@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 #include <JuceHeader.h>
 #include "BinaryData.h"
+#include "display_present.h"
 #include <cstring>
 
 // --- BypassHitArea ---
@@ -47,97 +48,6 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
     const juce::Graphics::ScopedSaveState clipState(g);
     g.reduceClipRegion(clip);
 
-    // 预设背景（每个预设差异要大一些）
-    auto drawBackground = [&]()
-    {
-        switch (preset)
-        {
-            case 0: // 老电视：噪声底在后面画
-            {
-                g.fillAll(juce::Colours::black.withAlpha(0.06f));
-                break;
-            }
-            case 1: // 冷色渐变 + 网格
-            {
-                juce::ColourGradient grad(juce::Colour::fromRGB(0x05, 0x0E, 0x1A), b.getX(), b.getY(),
-                                          juce::Colour::fromRGB(0x00, 0x1A, 0x2C), b.getRight(), b.getBottom(), false);
-                g.setGradientFill(grad);
-                g.fillRect(b);
-                break;
-            }
-            case 2: // CRT 琥珀
-            {
-                g.fillAll(juce::Colour::fromRGB(0x10, 0x06, 0x00));
-                break;
-            }
-            case 3: // 彩虹：纯黑背景
-            {
-                g.fillAll(juce::Colours::black.withAlpha(0.30f));
-                break;
-            }
-            case 4: // 点阵：深灰
-            {
-                g.fillAll(juce::Colours::black.withAlpha(0.40f));
-                break;
-            }
-            case 5: // 填充：深蓝黑
-            {
-                g.fillAll(juce::Colour::fromRGB(0x03, 0x05, 0x0A));
-                break;
-            }
-            case 6: // 镜像：深绿黑
-            {
-                g.fillAll(juce::Colour::fromRGB(0x00, 0x08, 0x04));
-                break;
-            }
-            case 7: // 条形码：偏紫黑
-            {
-                g.fillAll(juce::Colour::fromRGB(0x08, 0x02, 0x10));
-                break;
-            }
-            case 8: // 故障：灰噪轻底
-            {
-                g.fillAll(juce::Colours::black.withAlpha(0.18f));
-                break;
-            }
-            case 9: // 霓虹紫：暗底
-            {
-                g.fillAll(juce::Colour::fromRGB(0x05, 0x00, 0x08));
-                break;
-            }
-            case 10: // 极简：几乎全黑
-            {
-                g.fillAll(juce::Colours::black.withAlpha(0.15f));
-                break;
-            }
-            case 11: // 绿屏：扫描线
-            {
-                g.fillAll(juce::Colour::fromRGB(0x00, 0x10, 0x08));
-                break;
-            }
-            default:
-                g.fillAll(juce::Colours::black.withAlpha(0.35f));
-        }
-    };
-
-    auto drawGrid = [&](juce::Colour c, int stepPx)
-    {
-        g.setColour(c);
-        for (float x = b.getX(); x <= b.getRight(); x += (float) stepPx)
-            g.drawLine(x, b.getY(), x, b.getBottom(), 1.0f);
-        for (float y = b.getY(); y <= b.getBottom(); y += (float) stepPx)
-            g.drawLine(b.getX(), y, b.getRight(), y, 1.0f);
-    };
-
-    auto drawScanlines = [&](juce::Colour c, int stepPx)
-    {
-        g.setColour(c);
-        for (float y = b.getY(); y <= b.getBottom(); y += (float) stepPx)
-            g.drawLine(b.getX(), y, b.getRight(), y, 1.0f);
-    };
-
-    drawBackground();
-
     // bypass：不显示中间波形（但仍允许动画覆盖层在下面继续绘制）
     const bool bypassActive = owner.isBypassedOrTransitioningToBypass();
 
@@ -145,17 +55,487 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
     if (samples.isEmpty() && ! bypassActive)
         return;
 
-    const float midY = b.getCentreY();
-    const float scaleY = b.getHeight() * 0.40f;
+    // ============================================================
+    // 1) 离屏渲染基础画面（背景 + 波形 + glitch + 动画），再做“按行 remap”
+    //    这样才能实现真实的“行同步噪声导致每一行左右偏移”。
+    // ============================================================
+
+    const int W = juce::jmax(2, (int) std::ceil(b.getWidth()));
+    const int H = juce::jmax(2, (int) std::ceil(b.getHeight()));
+
+    if (screenBase.getWidth() != W || screenBase.getHeight() != H)
+    {
+        screenBase = juce::Image(juce::Image::ARGB, W, H, true);
+        screenWarp = juce::Image(juce::Image::ARGB, W, H, true);
+
+        screenBufferW = W;
+        screenBufferH = H;
+
+        scanlineNoiseRaw.assign((size_t) H, 0.0f);
+        scanlineNoiseSmoothed.assign((size_t) H, 0.0f);
+        scanlineOffsetPx.assign((size_t) H, 0.0f);
+    }
+
+    // 离屏上使用 (0,0,W,H) 坐标；最终再画回到 b
+    const juce::Rectangle<float> sb(0.0f, 0.0f, (float) W, (float) H);
+
+    // === 预设背景（算法化）===
+    // 要点：每个预设的背景“算法差异”尽量大，同时所有可调参数集中在 display_present.h
+    auto drawBackground = [&](juce::Graphics& gg)
+    {
+        const auto& presetParams = display_present::getPresetParams(preset);
+        const auto& bg = presetParams.bg;
+
+        const float seconds = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
+        juce::Random rng ((int) (juce::Time::getMillisecondCounter() ^ (preset * 0xA341316C)));
+
+        // 1) 基础底色/渐变
+        {
+            juce::ColourGradient grad(bg.baseA, sb.getX(), sb.getY(), bg.baseB, sb.getRight(), sb.getBottom(), false);
+            gg.setGradientFill(grad);
+            gg.fillRect(sb);
+        }
+
+        auto applyVignette = [&](float alpha)
+        {
+            if (alpha <= 0.0f)
+                return;
+
+            juce::ColourGradient vg(juce::Colours::transparentBlack, sb.getCentreX(), sb.getCentreY(),
+                                    juce::Colours::black.withAlpha(alpha), sb.getCentreX(), sb.getBottom(), true);
+            vg.addColour(0.65, juce::Colours::transparentBlack);
+            gg.setGradientFill(vg);
+            gg.fillRect(sb);
+        };
+
+        auto applyNoise = [&](float alpha, int downsample)
+        {
+            if (alpha <= 0.0f)
+                return;
+
+            downsample = juce::jlimit(2, 12, downsample);
+            const int lw = juce::jmax(2, (int) (sb.getWidth()  / (float) downsample));
+            const int lh = juce::jmax(2, (int) (sb.getHeight() / (float) downsample));
+
+            juce::Image noiseImg(juce::Image::ARGB, lw, lh, true);
+            {
+                juce::Image::BitmapData bd(noiseImg, juce::Image::BitmapData::readWrite);
+                juce::Random nrng ((int) (juce::Time::getMillisecondCounter() ^ (preset * 0xC2B2AE35)));
+
+                for (int y = 0; y < lh; ++y)
+                {
+                    auto* line = reinterpret_cast<juce::PixelARGB*> (bd.getLinePointer(y));
+                    for (int x = 0; x < lw; ++x)
+                    {
+                        const auto v = (juce::uint8) (nrng.nextInt(256));
+                        line[x].setARGB((juce::uint8) (juce::jlimit(0, 255, (int) std::round(alpha * 255.0f))), v, v, v);
+                    }
+                }
+            }
+
+            gg.drawImage(noiseImg,
+                         sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
+                         0, 0, lw, lh,
+                         false);
+        };
+
+        auto applyGrid = [&](float alpha, int stepPx)
+        {
+            if (alpha <= 0.0f)
+                return;
+
+            stepPx = juce::jlimit(12, 72, stepPx);
+            gg.setColour(juce::Colours::white.withAlpha(alpha));
+
+            for (float x = sb.getX(); x <= sb.getRight(); x += (float) stepPx)
+                gg.drawLine(x, sb.getY(), x, sb.getBottom(), 1.0f);
+            for (float y = sb.getY(); y <= sb.getBottom(); y += (float) stepPx)
+                gg.drawLine(sb.getX(), y, sb.getRight(), y, 1.0f);
+        };
+
+        auto applyScanlines = [&](float alpha, int stepPx)
+        {
+            if (alpha <= 0.0f)
+                return;
+
+            stepPx = juce::jlimit(1, 6, stepPx);
+            gg.setColour(juce::Colours::black.withAlpha(alpha));
+            for (float y = sb.getY(); y <= sb.getBottom(); y += (float) stepPx)
+                gg.drawLine(sb.getX(), y, sb.getRight(), y, 1.0f);
+        };
+
+        // 2) 根据背景算法类型叠加“特征纹理”
+        switch (bg.kind)
+        {
+            case display_present::BackgroundKind::digitalGrid:
+            {
+                // 预设 1：这里会带“玻璃弧形”扭曲：中心略放大，四周缩紧（只扭曲网格，不扭曲底色）
+                const float gw = juce::jlimit(0.0f, 0.25f, bg.glassWarp);
+                if (gw > 0.0f)
+                {
+                    // 用“径向非线性映射”来弯曲网格线：x/y 都会随着半径变化，线条就会自然弯起来
+                    // 这里用轻微的 pincushion（k<0）来实现“中心放大、四周缩紧”的感觉
+                    const float cx = sb.getCentreX();
+                    const float cy = sb.getCentreY();
+                    const float rx = sb.getWidth() * 0.5f;
+                    const float ry = sb.getHeight() * 0.5f;
+
+                    const float k = -gw; // 负号：边缘向中心收拢
+
+                    auto warpPoint = [&](float x, float y)
+                    {
+                        const float nx = (x - cx) / rx;
+                        const float ny = (y - cy) / ry;
+                        const float r2 = nx * nx + ny * ny;
+
+                        // r2 越大，收缩越明显；系数做轻微放大以便肉眼可见
+                        const float f = 1.0f + (0.85f * k) * r2;
+                        return juce::Point<float>(cx + nx * rx * f, cy + ny * ry * f);
+                    };
+
+                    const int stepPx = juce::jlimit(12, 72, bg.gridStepPx);
+                    gg.setColour(juce::Colours::white.withAlpha(bg.gridAlpha));
+
+                    // 扩展绘制范围：扭曲后四角容易“缩进去”，所以我们把网格线在边界外多画几条
+                    const float margin = (float) (stepPx * 3);
+
+                    // 画竖线：x 固定、沿 y 采样，得到一条弯曲的 Path
+                    for (float x = sb.getX() - margin; x <= sb.getRight() + margin; x += (float) stepPx)
+                    {
+                        juce::Path p;
+                        const float y0 = sb.getY() - margin;
+                        const float y1 = sb.getBottom() + margin;
+                        const float dy = 7.0f;
+
+                        auto pt0 = warpPoint(x, y0);
+                        p.startNewSubPath(pt0.x, pt0.y);
+                        for (float y = y0 + dy; y <= y1 + 0.5f; y += dy)
+                        {
+                            auto pt = warpPoint(x, juce::jmin(y, y1));
+                            p.lineTo(pt.x, pt.y);
+                        }
+                        gg.strokePath(p, juce::PathStrokeType(1.0f));
+                    }
+
+                    // 画横线：y 固定、沿 x 采样
+                    for (float y = sb.getY() - margin; y <= sb.getBottom() + margin; y += (float) stepPx)
+                    {
+                        juce::Path p;
+                        const float x0 = sb.getX() - margin;
+                        const float x1 = sb.getRight() + margin;
+                        const float dx = 7.0f;
+
+                        auto pt0 = warpPoint(x0, y);
+                        p.startNewSubPath(pt0.x, pt0.y);
+                        for (float x = x0 + dx; x <= x1 + 0.5f; x += dx)
+                        {
+                            auto pt = warpPoint(juce::jmin(x, x1), y);
+                            p.lineTo(pt.x, pt.y);
+                        }
+                        gg.strokePath(p, juce::PathStrokeType(1.0f));
+                    }
+
+                    // 轻微的边缘加深，让“弧形玻璃”更明显
+                    applyVignette(bg.vignetteAlpha);
+                }
+
+                else
+                {
+                    applyGrid(bg.gridAlpha, bg.gridStepPx);
+                    applyVignette(bg.vignetteAlpha);
+                }
+
+                // 注意：preset1 已在参数表中把 noiseAlpha 设为 0，所以这里不会有轻噪
+                applyNoise(bg.noiseAlpha, bg.noiseDownsample);
+                break;
+            }
+            case display_present::BackgroundKind::amberVignette:
+            {
+                // 琥珀辉光：中心偏亮、边缘偏暗
+                juce::ColourGradient glow(juce::Colour::fromRGB(0xFF, 0xB0, 0x30).withAlpha(bg.accentAlpha),
+                                          sb.getCentreX(), sb.getCentreY(),
+                                          juce::Colours::transparentBlack,
+                                          sb.getCentreX(), sb.getBottom(), true);
+                glow.addColour(0.25, juce::Colour::fromRGB(0xFF, 0xB0, 0x30).withAlpha(bg.accentAlpha * 0.6f));
+                gg.setGradientFill(glow);
+                gg.fillRect(sb);
+
+                applyScanlines(bg.scanlineAlpha, bg.scanlineStepPx);
+                applyNoise(bg.noiseAlpha, bg.noiseDownsample);
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+            case display_present::BackgroundKind::radarSweep:
+            {
+                // 同心环 + 扫掠扇形（紫外雷达风）
+                const float cx = sb.getCentreX();
+                const float cy = sb.getCentreY();
+                const float rMax = 0.52f * juce::jmin(sb.getWidth(), sb.getHeight());
+
+                gg.setColour(juce::Colours::white.withAlpha(bg.gridAlpha));
+                const int rings = 5;
+                for (int i = 1; i <= rings; ++i)
+                {
+                    const float rr = rMax * ((float) i / (float) rings);
+                    gg.drawEllipse(cx - rr, cy - rr, rr * 2.0f, rr * 2.0f, 1.0f);
+                }
+
+                // 十字准星
+                gg.setColour(juce::Colours::white.withAlpha(bg.gridAlpha * 0.85f));
+                gg.drawLine(cx, sb.getY(), cx, sb.getBottom(), 1.0f);
+                gg.drawLine(sb.getX(), cy, sb.getRight(), cy, 1.0f);
+
+                // 扫掠扇形（渐隐）
+                const float ang = std::fmod(seconds * (0.9f + 0.8f * bg.motionSpeed), juce::MathConstants<float>::twoPi);
+                const float sweepWidth = 0.65f;
+                juce::Path sweep;
+                sweep.addPieSegment(juce::Rectangle<float>(cx - rMax, cy - rMax, rMax * 2.0f, rMax * 2.0f),
+                                    ang - sweepWidth * 0.5f, ang + sweepWidth * 0.5f, 0.0f);
+
+                gg.setColour(juce::Colour::fromRGB(0xA0, 0x50, 0xFF).withAlpha(bg.accentAlpha));
+                gg.fillPath(sweep);
+
+                applyNoise(bg.noiseAlpha, bg.noiseDownsample);
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+            case display_present::BackgroundKind::phosphorBloom:
+            {
+                // 冷色磷光 CRT：中心辉光 + 强扫描线（不依赖噪点）
+                juce::Colour core = juce::Colour::fromRGB(0x5A, 0xFF, 0xE5).withAlpha(bg.accentAlpha);
+                juce::Colour edge = juce::Colours::transparentBlack;
+
+                juce::ColourGradient bloom(core, sb.getCentreX(), sb.getCentreY(), edge, sb.getCentreX(), sb.getBottom(), true);
+                bloom.addColour(0.25, core.withAlpha(bg.accentAlpha * 0.55f));
+                bloom.addColour(0.55, core.withAlpha(bg.accentAlpha * 0.25f));
+                gg.setGradientFill(bloom);
+                gg.fillRect(sb);
+
+                // 稍微再加一层偏横向的辉光，模拟“屏幕玻璃散射”
+                juce::ColourGradient bloom2(core.withAlpha(bg.accentAlpha * 0.55f), sb.getX(), sb.getCentreY(),
+                                            edge, sb.getRight(), sb.getCentreY(), false);
+                gg.setGradientFill(bloom2);
+                gg.fillRect(sb);
+
+                applyScanlines(bg.scanlineAlpha, bg.scanlineStepPx);
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+            case display_present::BackgroundKind::rainbowInterference:
+
+            {
+                // 彩色干扰条：多条窄的横向渐变条，随时间漂移
+                const int bands = 18;
+                for (int i = 0; i < bands; ++i)
+                {
+                    const float t = (float) i / (float) bands;
+                    const float hue = std::fmod(t + seconds * 0.08f * bg.motionSpeed, 1.0f);
+                    const float y = sb.getY() + (t * sb.getHeight());
+                    const float h = 4.0f + 10.0f * (0.5f + 0.5f * std::sin(seconds * (0.7f + 0.12f * i)));
+
+                    juce::ColourGradient cg(juce::Colour::fromHSV(hue, 0.95f, 1.0f, bg.accentAlpha), sb.getX(), y,
+                                            juce::Colours::transparentBlack, sb.getRight(), y + h,
+                                            false);
+                    gg.setGradientFill(cg);
+                    gg.fillRect(sb.getX(), y, sb.getWidth(), h);
+                }
+
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+
+            case display_present::BackgroundKind::dotMask:
+            {
+                // 点阵遮罩：用 tiled fill 做“点阵/子像素”感（比逐像素更快）
+                const int step = juce::jlimit(2, 6, 4);
+                static juce::Image tile;
+                if (! tile.isValid())
+                {
+                    tile = juce::Image(juce::Image::ARGB, step * 2, step * 2, true);
+                    juce::Graphics tg(tile);
+                    tg.fillAll(juce::Colours::transparentBlack);
+                    tg.setColour(juce::Colours::white.withAlpha(0.06f));
+                    tg.fillEllipse(0.0f, 0.0f, (float) step, (float) step);
+                    tg.fillEllipse((float) step, (float) step, (float) step, (float) step);
+                }
+
+                gg.setTiledImageFill(tile, (int) std::fmod(seconds * 12.0f * bg.motionSpeed, (float) (step * 2)),
+                                     (int) std::fmod(seconds * 6.0f * bg.motionSpeed, (float) (step * 2)),
+                                     1.0f);
+                gg.setOpacity(0.35f);
+                gg.fillRect(sb);
+                gg.setOpacity(1.0f);
+
+                applyNoise(bg.noiseAlpha, bg.noiseDownsample);
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+            case display_present::BackgroundKind::oceanBlobs:
+            {
+                // 柔和流动光斑：几枚大的径向渐变 blob
+                const int blobs = 5;
+                for (int i = 0; i < blobs; ++i)
+                {
+                    const float ph = seconds * (0.25f + 0.07f * (float) i) * bg.motionSpeed;
+                    const float x = sb.getX() + (0.15f + 0.70f * (0.5f + 0.5f * std::sin(ph + 1.7f * i))) * sb.getWidth();
+                    const float y = sb.getY() + (0.15f + 0.70f * (0.5f + 0.5f * std::cos(ph * 0.9f + 2.3f * i))) * sb.getHeight();
+                    const float r = 40.0f + 120.0f * (0.5f + 0.5f * std::sin(ph * 1.3f));
+
+                    juce::Colour c = juce::Colour::fromRGB(0x00, 0xFF, 0xC6).withAlpha(bg.accentAlpha * 0.75f);
+                    juce::ColourGradient cg(c, x, y, juce::Colours::transparentBlack, x + r, y + r, true);
+                    cg.addColour(0.35, c.withAlpha(bg.accentAlpha * 0.35f));
+                    gg.setGradientFill(cg);
+                    gg.fillEllipse(x - r, y - r, r * 2.0f, r * 2.0f);
+                }
+
+                applyVignette(bg.vignetteAlpha);
+                applyNoise(bg.noiseAlpha, bg.noiseDownsample);
+                break;
+            }
+            case display_present::BackgroundKind::mirrorCross:
+            {
+                // 中心十字+轻网格
+                gg.setColour(juce::Colours::white.withAlpha(bg.gridAlpha));
+                gg.drawLine(sb.getCentreX(), sb.getY(), sb.getCentreX(), sb.getBottom(), 1.0f);
+                gg.drawLine(sb.getX(), sb.getCentreY(), sb.getRight(), sb.getCentreY(), 1.0f);
+
+                applyGrid(bg.gridAlpha * 0.6f, bg.gridStepPx);
+                applyScanlines(bg.scanlineAlpha, bg.scanlineStepPx);
+
+                // 一根缓慢移动的扫描线（替代“闪烁矩形光斑”的视觉干扰）
+                const float y = sb.getY() + std::fmod(seconds * (0.18f + 0.10f * bg.motionSpeed), 1.0f) * sb.getHeight();
+                juce::ColourGradient sl(juce::Colours::transparentWhite, sb.getX(), y - 10.0f,
+                                        juce::Colours::white.withAlpha(bg.accentAlpha * 0.9f), sb.getX(), y,
+                                        false);
+                sl.addColour(0.75, juce::Colours::transparentWhite);
+                gg.setGradientFill(sl);
+                gg.fillRect(sb.getX(), y - 10.0f, sb.getWidth(), 20.0f);
+
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+
+            case display_present::BackgroundKind::barcode:
+            {
+                // 竖条纹：随机条宽/间隔（轻微动画）
+                const float base = 0.10f + 0.06f * (0.5f + 0.5f * std::sin(seconds * 0.7f * bg.motionSpeed));
+                for (float x = sb.getX(); x < sb.getRight();)
+                {
+                    const float w = 1.0f + (float) (1 + (rng.nextInt(6)));
+                    const float gap = (float) (rng.nextInt(5));
+                    gg.setColour(juce::Colours::white.withAlpha(base * (rng.nextBool() ? 0.45f : 1.0f)));
+                    gg.fillRect(x, sb.getY(), w, sb.getHeight());
+                    x += w + gap;
+                }
+
+                applyVignette(bg.vignetteAlpha);
+                applyNoise(bg.noiseAlpha, bg.noiseDownsample);
+                break;
+            }
+            case display_present::BackgroundKind::glitchStatic:
+            {
+                // 静电：更粗的噪点 + 偶发的亮线
+                applyNoise(bg.noiseAlpha, juce::jlimit(2, 12, bg.noiseDownsample));
+
+                const int lines = 2 + (int) std::round(6.0f * (0.5f + 0.5f * std::sin(seconds * 1.3f * bg.motionSpeed)));
+                gg.setColour(juce::Colours::white.withAlpha(bg.accentAlpha));
+                for (int i = 0; i < lines; ++i)
+                {
+                    const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                    gg.drawLine(sb.getX(), y, sb.getRight(), y, 1.0f);
+                }
+
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+            case display_present::BackgroundKind::neonStarfield:
+            {
+                // 星点：属于“噪点类装饰”，用 bg.noiseAlpha 作为开关/强度
+                const float starK = juce::jlimit(0.0f, 1.0f, bg.noiseAlpha / 0.03f);
+                if (starK > 0.0f)
+                {
+                    const int stars = 20 + (int) std::round(60.0f * starK);
+                    gg.setColour(juce::Colours::white.withAlpha(0.04f * starK));
+                    for (int i = 0; i < stars; ++i)
+                    {
+                        const float x = sb.getX() + rng.nextFloat() * sb.getWidth();
+                        const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                        gg.fillRect(x, y, 1.0f, 1.0f);
+                    }
+
+                    const int meteors = (starK > 0.6f ? 2 : 1);
+                    gg.setColour(juce::Colour::fromRGB(0xB7, 0x4D, 0xFF).withAlpha(bg.accentAlpha * starK));
+                    for (int i = 0; i < meteors; ++i)
+                    {
+                        const float x = sb.getX() + rng.nextFloat() * sb.getWidth();
+                        const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                        gg.drawLine(x, y, x + (20.0f + 40.0f * rng.nextFloat()), y + (8.0f + 18.0f * rng.nextFloat()), 1.0f);
+                    }
+                }
+
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+
+            case display_present::BackgroundKind::minimalVignette:
+            {
+                applyNoise(bg.noiseAlpha, bg.noiseDownsample);
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+            case display_present::BackgroundKind::greenTerminal:
+            {
+                // 终端列：低透明度的字符列（用细竖条模拟）
+                gg.setColour(juce::Colour::fromRGB(0x00, 0xFF, 0x66).withAlpha(bg.accentAlpha));
+                for (float x = sb.getX(); x < sb.getRight(); x += 14.0f)
+                {
+                    const float h = sb.getHeight() * (0.15f + 0.85f * rng.nextFloat());
+                    const float y0 = sb.getY() + rng.nextFloat() * (sb.getHeight() - h);
+                    gg.fillRect(x, y0, 2.0f, h);
+                }
+
+                applyScanlines(bg.scanlineAlpha, bg.scanlineStepPx);
+                applyNoise(bg.noiseAlpha, bg.noiseDownsample);
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+            case display_present::BackgroundKind::legacySolid:
+            default:
+            {
+                applyVignette(bg.vignetteAlpha);
+                break;
+            }
+        }
+    };
+
+    auto drawGrid = [&](juce::Graphics& gg, juce::Colour c, int stepPx)
+    {
+        gg.setColour(c);
+        for (float x = sb.getX(); x <= sb.getRight(); x += (float) stepPx)
+            gg.drawLine(x, sb.getY(), x, sb.getBottom(), 1.0f);
+        for (float y = sb.getY(); y <= sb.getBottom(); y += (float) stepPx)
+            gg.drawLine(sb.getX(), y, sb.getRight(), y, 1.0f);
+    };
+
+    auto drawScanlines = [&](juce::Graphics& gg, juce::Colour c, int stepPx)
+    {
+        gg.setColour(c);
+        for (float y = sb.getY(); y <= sb.getBottom(); y += (float) stepPx)
+            gg.drawLine(sb.getX(), y, sb.getRight(), y, 1.0f);
+    };
+
+    // === 生成波形 Path（离屏坐标）===
+    const float midY = sb.getCentreY();
+    const float scaleY = sb.getHeight() * 0.40f;
 
     juce::Path waveform;
 
     const int n = samples.size();
-    const float dx = (n > 1 ? (b.getWidth() / (float) (n - 1)) : 0.0f);
+    const float dx = (n > 1 ? (sb.getWidth() / (float) (n - 1)) : 0.0f);
 
     auto sampleToPoint = [&](int i)
     {
-        const float x = b.getX() + dx * (float) i;
+        const float x = sb.getX() + dx * (float) i;
         const float s = juce::jlimit(-1.0f, 1.0f, samples.getUnchecked(i));
         const float y = midY - s * scaleY;
         return juce::Point<float>(x, y);
@@ -166,647 +546,892 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         for (int i = 0; i < n; ++i)
         {
             const auto p = sampleToPoint(i);
-
-            if (i == 0)
-                waveform.startNewSubPath(p.x, p.y);
-            else
-                waveform.lineTo(p.x, p.y);
+            if (i == 0) waveform.startNewSubPath(p.x, p.y);
+            else        waveform.lineTo(p.x, p.y);
         }
     }
 
-    // 预设 0：像素电视雪花
-    if (preset == 0 && ! bypassActive)
+    // === 先在 screenBase 上画完整画面 ===
     {
-        const int downsample = 5;
-        const int lw = juce::jmax(2, (int) (b.getWidth()  / (float) downsample));
-        const int lh = juce::jmax(2, (int) (b.getHeight() / (float) downsample));
+        juce::Graphics gg(screenBase);
+        gg.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);
+        gg.fillAll(juce::Colours::transparentBlack);
 
-        juce::Image low (juce::Image::ARGB, lw, lh, true);
+        drawBackground(gg);
+
+        // 预设 0：像素电视雪花（这块仍然用原来的逐像素生成方式）
+        if (preset == 0 && ! bypassActive)
         {
-            juce::Image::BitmapData bd (low, juce::Image::BitmapData::readWrite);
-            juce::Random rng ((int) juce::Time::getMillisecondCounter());
+            const int downsample = 5;
+            const int lw = juce::jmax(2, (int) (sb.getWidth()  / (float) downsample));
+            const int lh = juce::jmax(2, (int) (sb.getHeight() / (float) downsample));
 
-            for (int y = 0; y < lh; ++y)
+            juce::Image low (juce::Image::ARGB, lw, lh, true);
             {
-                auto* line = reinterpret_cast<juce::PixelARGB*> (bd.getLinePointer(y));
-                const bool scanline = ((y & 1) == 0);
-
-                for (int x = 0; x < lw; ++x)
-                {
-                    juce::uint8 v;
-                    if (rng.nextFloat() < 0.12f)
-                        v = (juce::uint8) rng.nextInt(55);
-                    else
-                        v = (juce::uint8) (180 + rng.nextInt(76));
-
-                    v = (juce::uint8) ((v / 16) * 16);
-                    if (scanline)
-                        v = (juce::uint8) juce::jlimit(0, 255, (int) (v * 0.92f));
-
-                    line[x].setARGB((juce::uint8) 255, v, v, v);
-                }
-            }
-        }
-
-        g.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);
-        g.drawImage(low,
-                    b.getX(), b.getY(), b.getWidth(), b.getHeight(),
-                    0, 0, lw, lh,
-                    false);
-
-        const auto neonGreen = juce::Colour::fromRGB(0x39, 0xFF, 0x14);
-        const float pixelStep = 3.0f;
-        auto qx = [pixelStep, x0 = b.getX()](float x) { return x0 + std::round((x - x0) / pixelStep) * pixelStep; };
-        auto qy = [pixelStep, y0 = b.getY()](float y) { return y0 + std::round((y - y0) / pixelStep) * pixelStep; };
-
-        juce::Path pixelWave;
-        for (int i = 0; i < n; ++i)
-        {
-            const auto p = sampleToPoint(i);
-            const float x = qx(p.x);
-            const float y = qy(p.y);
-            if (i == 0) pixelWave.startNewSubPath(x, y);
-            else        pixelWave.lineTo(x, y);
-        }
-
-        g.setColour(juce::Colours::black.withAlpha(0.7f));
-        g.strokePath(pixelWave, juce::PathStrokeType(4.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
-
-        g.setColour(neonGreen.withAlpha(1.0f));
-        g.strokePath(pixelWave, juce::PathStrokeType(3.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
-    }
-    else if (! bypassActive)
-    {
-        switch (preset)
-        {
-            case 1: // 冷色辉光 + 网格
-            {
-                drawGrid(juce::Colours::white.withAlpha(0.04f), 30);
-                const auto c = juce::Colour::fromRGB(0x3A, 0xE6, 0xFF);
-
-                g.setColour(c.withAlpha(0.18f));
-                g.strokePath(waveform, juce::PathStrokeType(6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-                g.setColour(c.withAlpha(0.95f));
-                g.strokePath(waveform, juce::PathStrokeType(2.3f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                break;
-            }
-            case 2: // 琥珀 CRT：扫描线 + 残影
-            {
-                drawScanlines(juce::Colours::black.withAlpha(0.14f), 2);
-                const auto amber = juce::Colour::fromRGB(0xFF, 0xB0, 0x30);
-
-                juce::Path trail = waveform;
-                trail.applyTransform(juce::AffineTransform::translation(0.0f, 1.0f));
-                g.setColour(amber.withAlpha(0.14f));
-                g.strokePath(trail, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-                trail = waveform;
-                trail.applyTransform(juce::AffineTransform::translation(0.0f, -1.0f));
-                g.setColour(amber.withAlpha(0.10f));
-                g.strokePath(trail, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-                g.setColour(amber.withAlpha(1.0f));
-                g.strokePath(waveform, juce::PathStrokeType(2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                break;
-            }
-            case 3: // 彩虹分段线
-            {
-                for (int i = 1; i < n; ++i)
-                {
-                    const float t = (float) i / (float) (n - 1);
-                    auto col = juce::Colour::fromHSV(t, 0.85f, 1.0f, 0.95f);
-                    g.setColour(col);
-
-                    const auto p0 = sampleToPoint(i - 1);
-                    const auto p1 = sampleToPoint(i);
-                    g.drawLine(p0.x, p0.y, p1.x, p1.y, 2.2f);
-                }
-                break;
-            }
-            case 4: // 点阵采样（只画点）
-            {
-                const auto dot = juce::Colour::fromRGB(0xFF, 0x3A, 0xB7);
-                const int step = juce::jmax(1, n / 140);
-                for (int i = 0; i < n; i += step)
-                {
-                    const auto p = sampleToPoint(i);
-                    g.setColour(dot.withAlpha(0.95f));
-                    g.fillEllipse(p.x - 2.2f, p.y - 2.2f, 4.4f, 4.4f);
-                    g.setColour(juce::Colours::white.withAlpha(0.10f));
-                    g.drawEllipse(p.x - 2.2f, p.y - 2.2f, 4.4f, 4.4f, 1.0f);
-                }
-                break;
-            }
-            case 5: // 填充面积（青绿渐变）
-            {
-                juce::Path area = waveform;
-                area.lineTo(b.getRight(), midY);
-                area.lineTo(b.getX(), midY);
-                area.closeSubPath();
-
-                juce::ColourGradient fill(juce::Colour::fromRGB(0x00, 0xFF, 0xC6).withAlpha(0.35f), b.getX(), b.getY(),
-                                          juce::Colour::fromRGB(0x00, 0x40, 0xFF).withAlpha(0.05f), b.getX(), b.getBottom(), false);
-                g.setGradientFill(fill);
-                g.fillPath(area);
-
-                g.setColour(juce::Colour::fromRGB(0x00, 0xFF, 0xC6).withAlpha(0.95f));
-                g.strokePath(waveform, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                break;
-            }
-            case 6: // 镜像双波形
-            {
-                drawGrid(juce::Colours::white.withAlpha(0.03f), 40);
-                auto c = juce::Colour::fromRGB(0x7C, 0xFF, 0x6B);
-
-                juce::Path mirror = waveform;
-                mirror.applyTransform(juce::AffineTransform::scale(1.0f, -1.0f, 0.0f, midY));
-
-                g.setColour(juce::Colours::black.withAlpha(0.55f));
-                g.strokePath(mirror, juce::PathStrokeType(3.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-                g.setColour(c.withAlpha(0.95f));
-                g.strokePath(waveform, juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                g.strokePath(mirror,  juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                break;
-            }
-            case 7: // 条形码：竖线表示幅度
-            {
-                const auto mag = juce::Colour::fromRGB(0xFF, 0x4D, 0xFF);
-                const int step = juce::jmax(1, n / 180);
-                for (int i = 0; i < n; i += step)
-                {
-                    const auto p = sampleToPoint(i);
-                    g.setColour(mag.withAlpha(0.75f));
-                    g.drawLine(p.x, midY, p.x, p.y, 2.0f);
-                }
-
-                g.setColour(mag.withAlpha(0.95f));
-                g.strokePath(waveform, juce::PathStrokeType(1.6f, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
-                break;
-            }
-            case 8: // 故障：轻微抖动的分段线 + 细噪
-            {
+                juce::Image::BitmapData bd (low, juce::Image::BitmapData::readWrite);
                 juce::Random rng ((int) juce::Time::getMillisecondCounter());
-                const auto c = juce::Colour::fromRGB(0xFF, 0x66, 0x33);
 
-                for (int i = 1; i < n; ++i)
+                for (int y = 0; y < lh; ++y)
                 {
-                    const auto p0 = sampleToPoint(i - 1);
-                    const auto p1 = sampleToPoint(i);
-                    const float jx = (rng.nextFloat() - 0.5f) * 1.6f;
-                    const float jy = (rng.nextFloat() - 0.5f) * 1.2f;
-                    g.setColour(c.withAlpha(0.85f));
-                    g.drawLine(p0.x + jx, p0.y + jy, p1.x + jx, p1.y + jy, 2.0f);
+                    auto* line = reinterpret_cast<juce::PixelARGB*> (bd.getLinePointer(y));
+                    const bool scanline = ((y & 1) == 0);
+
+                    for (int x = 0; x < lw; ++x)
+                    {
+                        juce::uint8 v;
+                        if (rng.nextFloat() < 0.12f)
+                            v = (juce::uint8) rng.nextInt(55);
+                        else
+                            v = (juce::uint8) (180 + rng.nextInt(76));
+
+                        v = (juce::uint8) ((v / 16) * 16);
+                        if (scanline)
+                            v = (juce::uint8) juce::jlimit(0, 255, (int) (v * 0.92f));
+
+                        line[x].setARGB((juce::uint8) 255, v, v, v);
+                    }
+                }
+            }
+
+            gg.drawImage(low,
+                         sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
+                         0, 0, lw, lh,
+                         false);
+
+            const auto neonGreen = juce::Colour::fromRGB(0x39, 0xFF, 0x14);
+            const float pixelStep = 3.0f;
+            auto qx = [pixelStep, x0 = sb.getX()](float x) { return x0 + std::round((x - x0) / pixelStep) * pixelStep; };
+            auto qy = [pixelStep, y0 = sb.getY()](float y) { return y0 + std::round((y - y0) / pixelStep) * pixelStep; };
+
+            juce::Path pixelWave;
+            for (int i = 0; i < n; ++i)
+            {
+                const auto p = sampleToPoint(i);
+                const float x = qx(p.x);
+                const float y = qy(p.y);
+                if (i == 0) pixelWave.startNewSubPath(x, y);
+                else        pixelWave.lineTo(x, y);
+            }
+
+            gg.setColour(juce::Colours::black.withAlpha(0.7f));
+            gg.strokePath(pixelWave, juce::PathStrokeType(4.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
+
+            gg.setColour(neonGreen.withAlpha(1.0f));
+            gg.strokePath(pixelWave, juce::PathStrokeType(3.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
+        }
+        else if (! bypassActive)
+        {
+            switch (preset)
+            {
+                case 1:
+                {
+                    // 网格由背景算法（带玻璃弧形扭曲）负责，这里只画波形，避免“正方形格子 + 扭曲格子”叠在一起
+                    const auto c = juce::Colour::fromRGB(0x3A, 0xE6, 0xFF);
+
+                    gg.setColour(c.withAlpha(0.18f));
+                    gg.strokePath(waveform, juce::PathStrokeType(6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    gg.setColour(c.withAlpha(0.95f));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.3f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    break;
                 }
 
-                // 叠一层细颗粒
-                const int dots = 120;
-                g.setColour(juce::Colours::white.withAlpha(0.06f));
+                case 2:
+                {
+                    drawScanlines(gg, juce::Colours::black.withAlpha(0.14f), 2);
+                    const auto amber = juce::Colour::fromRGB(0xFF, 0xB0, 0x30);
+
+                    juce::Path trail = waveform;
+                    trail.applyTransform(juce::AffineTransform::translation(0.0f, 1.0f));
+                    gg.setColour(amber.withAlpha(0.14f));
+                    gg.strokePath(trail, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    trail = waveform;
+                    trail.applyTransform(juce::AffineTransform::translation(0.0f, -1.0f));
+                    gg.setColour(amber.withAlpha(0.10f));
+                    gg.strokePath(trail, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    gg.setColour(amber.withAlpha(1.0f));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    break;
+                }
+                case 3:
+                {
+                    // 视觉暂留（按“黑屏衰减”的理解）：保留过去 ~0.5s 的若干条波形快照，
+                    // 让它们随着时间变暗（趋近黑色）并向右轻微偏移；不做图像反馈，因此不会出现“无限模糊拖尾”。
+
+                    const double nowSec = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
+                    // 若暂停太久就清空，避免残影被“冻结”误判为不消失
+                    if (preset3TrailLastSec > 0.0 && (nowSec - preset3TrailLastSec) > 0.25)
+                        preset3Trail.clear();
+                    preset3TrailLastSec = nowSec;
+
+                    constexpr double trailSec = 0.20;
+                    constexpr int maxItems = 40; // 60fps 下 0.5s 大约 30 帧，留一点余量
+
+                    preset3Trail.push_back(Preset3TrailItem{ waveform, nowSec });
+                    while ((int) preset3Trail.size() > maxItems)
+                        preset3Trail.pop_front();
+
+                    while (! preset3Trail.empty() && (nowSec - preset3Trail.front().tSec) > trailSec)
+                        preset3Trail.pop_front();
+
+                    // 先画旧的，新的覆盖在上面
+                    const auto baseTrail = juce::Colour::fromRGB(0x88, 0xFF, 0xFF);
+                    for (const auto& it : preset3Trail)
+                    {
+                        const float age = (float) (nowSec - it.tSec);
+                        const float u = juce::jlimit(0.0f, 1.0f, age / (float) trailSec);
+
+                        // u 越大越旧：变暗（趋近黑）+ 透明度快速下降
+                        const float brightnessMul = 1.0f - 0.90f * u;
+                        const float alpha = 0.45f * std::pow(1.0f - u, 2.2f);
+
+                        const int shiftPx = (int) std::round(24.0f * u);
+
+                        juce::Path p = it.path;
+                        p.applyTransform(juce::AffineTransform::translation((float) shiftPx, 0.0f));
+
+                        gg.setColour(baseTrail.withMultipliedBrightness(brightnessMul).withAlpha(alpha));
+                        gg.strokePath(p, juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    }
+
+                    // 当前帧：轻微辉光 + 彩色主线（更清晰）
+                    for (int pass = 0; pass < 2; ++pass)
+                    {
+                        const float a = (pass == 0 ? 0.06f : 0.90f);
+                        const float w = (pass == 0 ? 3.6f : 2.1f);
+
+                        for (int i = 1; i < n; ++i)
+                        {
+                            const float tt = (float) i / (float) (n - 1);
+                            auto col = juce::Colour::fromHSV(tt, 0.85f, 1.0f, a);
+                            gg.setColour(col);
+
+                            const auto p0 = sampleToPoint(i - 1);
+                            const auto p1 = sampleToPoint(i);
+                            gg.drawLine(p0.x, p0.y, p1.x, p1.y, w);
+                        }
+                    }
+
+                    break;
+                }
+
+                case 4:
+                {
+                    // 预设 4：全新风格（与雷达背景协调的“霓虹向量示波”）
+                    const auto neonA = juce::Colour::fromRGB(0xA0, 0x50, 0xFF);
+                    const auto neonB = juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
+
+                    juce::Path glow = waveform;
+                    glow.applyTransform(juce::AffineTransform::translation(0.0f, 0.6f));
+
+                    gg.setColour(juce::Colours::black.withAlpha(0.55f));
+                    gg.strokePath(glow, juce::PathStrokeType(7.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    gg.setColour(neonA.withAlpha(0.14f));
+                    gg.strokePath(waveform, juce::PathStrokeType(10.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    gg.setColour(neonB.withAlpha(0.85f));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    // 采样点高光（少量）
+                    const int step = juce::jmax(1, n / 110);
+                    gg.setColour(neonB.withAlpha(0.20f));
+                    for (int i = 0; i < n; i += step)
+                    {
+                        const auto p = sampleToPoint(i);
+                        gg.fillEllipse(p.x - 1.4f, p.y - 1.4f, 2.8f, 2.8f);
+                    }
+
+                    break;
+                }
+
+                case 5:
+                {
+                    // 冷色磷光：更像 CRT 的“发光磷粉”，让波形清晰但有柔和辉光
+                    const auto c = juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
+
+                    // 压暗底阴影（让亮线更立体）
+                    juce::Path shadow = waveform;
+                    shadow.applyTransform(juce::AffineTransform::translation(1.2f, 1.0f));
+                    gg.setColour(juce::Colours::black.withAlpha(0.55f));
+                    gg.strokePath(shadow, juce::PathStrokeType(6.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    // 外辉光
+                    gg.setColour(c.withAlpha(0.14f));
+                    gg.strokePath(waveform, juce::PathStrokeType(9.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    // 内辉光
+                    gg.setColour(c.withAlpha(0.28f));
+                    gg.strokePath(waveform, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    // 主线
+                    gg.setColour(c.withAlpha(0.96f));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    break;
+                }
+
+                case 6:
+                {
+                    drawGrid(gg, juce::Colours::white.withAlpha(0.03f), 40);
+                    auto c = juce::Colour::fromRGB(0x7C, 0xFF, 0x6B);
+
+                    juce::Path mirror = waveform;
+                    mirror.applyTransform(juce::AffineTransform::scale(1.0f, -1.0f, 0.0f, midY));
+
+                    gg.setColour(juce::Colours::black.withAlpha(0.55f));
+                    gg.strokePath(mirror, juce::PathStrokeType(3.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    gg.setColour(c.withAlpha(0.95f));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(mirror,  juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    break;
+                }
+                case 7:
+                {
+                    const auto mag = juce::Colour::fromRGB(0xFF, 0x4D, 0xFF);
+                    const int step = juce::jmax(1, n / 180);
+                    for (int i = 0; i < n; i += step)
+                    {
+                        const auto p = sampleToPoint(i);
+                        gg.setColour(mag.withAlpha(0.75f));
+                        gg.drawLine(p.x, midY, p.x, p.y, 2.0f);
+                    }
+
+                    gg.setColour(mag.withAlpha(0.95f));
+                    gg.strokePath(waveform, juce::PathStrokeType(1.6f, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
+                    break;
+                }
+                case 8:
+                {
+                    // 预设 8：加入 0.5s 拖影（逐渐变黑消失），但不做右移
+                    const double nowSec = juce::Time::getMillisecondCounterHiRes() * 0.001;
+                    if (preset8TrailLastSec > 0.0 && (nowSec - preset8TrailLastSec) > 0.25)
+                        preset8Trail.clear();
+                    preset8TrailLastSec = nowSec;
+
+                    constexpr double trailSec = 0.30;
+                    constexpr int maxItems = 40;
+
+                    juce::Random rng ((int) juce::Time::getMillisecondCounter());
+                    const auto c = juce::Colour::fromRGB(0xFF, 0x66, 0x33);
+
+                    // 当前帧：保留原来的“抖动”风格，但改成 Path 以便写入拖影队列
+                    juce::Path jitterPath;
+                    if (n > 0)
+                    {
+                        const auto p0 = sampleToPoint(0);
+                        jitterPath.startNewSubPath(p0.x, p0.y);
+                        for (int i = 1; i < n; ++i)
+                        {
+                            const auto p1 = sampleToPoint(i);
+                            const float jx = (rng.nextFloat() - 0.5f) * 1.6f;
+                            const float jy = (rng.nextFloat() - 0.5f) * 1.2f;
+                            jitterPath.lineTo(p1.x + jx, p1.y + jy);
+                        }
+                    }
+
+                    preset8Trail.push_back(Preset3TrailItem{ jitterPath, nowSec });
+                    while ((int) preset8Trail.size() > maxItems)
+                        preset8Trail.pop_front();
+                    while (! preset8Trail.empty() && (nowSec - preset8Trail.front().tSec) > trailSec)
+                        preset8Trail.pop_front();
+
+                    // 先画旧的拖影，再画当前帧
+                    for (const auto& it : preset8Trail)
+                    {
+                        const float age = (float) (nowSec - it.tSec);
+                        const float u = juce::jlimit(0.0f, 1.0f, age / (float) trailSec);
+
+                        const float brightnessMul = 1.0f - 0.92f * u;
+                        const float alpha = 0.40f * std::pow(1.0f - u, 2.4f);
+
+                        gg.setColour(c.withMultipliedBrightness(brightnessMul).withAlpha(alpha));
+                        gg.strokePath(it.path, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    }
+
+                    const int dots = 120;
+                    gg.setColour(juce::Colours::white.withAlpha(0.06f));
+                    for (int i = 0; i < dots; ++i)
+                    {
+                        const float x = sb.getX() + rng.nextFloat() * sb.getWidth();
+                        const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                        gg.fillRect(x, y, 1.0f, 1.0f);
+                    }
+                    break;
+                }
+
+                case 9:
+                {
+                    const auto purp = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF);
+                    juce::Path shadow = waveform;
+                    shadow.applyTransform(juce::AffineTransform::translation(2.0f, 2.0f));
+
+                    gg.setColour(juce::Colours::black.withAlpha(0.60f));
+                    gg.strokePath(shadow, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    gg.setColour(purp.withAlpha(0.20f));
+                    gg.strokePath(waveform, juce::PathStrokeType(7.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    gg.setColour(purp.withAlpha(1.0f));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    break;
+                }
+                case 10:
+                {
+                    // 预设 10：加入 0.5s 拖影（逐渐变黑消失），但不移动
+                    const double nowSec = juce::Time::getMillisecondCounterHiRes() * 0.001;
+                    if (preset10TrailLastSec > 0.0 && (nowSec - preset10TrailLastSec) > 0.25)
+                        preset10Trail.clear();
+                    preset10TrailLastSec = nowSec;
+
+                    constexpr double trailSec = 1.8;
+                    constexpr int maxItems = 40;
+
+                    preset10Trail.push_back(Preset3TrailItem{ waveform, nowSec });
+                    while ((int) preset10Trail.size() > maxItems)
+                        preset10Trail.pop_front();
+                    while (! preset10Trail.empty() && (nowSec - preset10Trail.front().tSec) > trailSec)
+                        preset10Trail.pop_front();
+
+                    for (const auto& it : preset10Trail)
+                    {
+                        const float age = (float) (nowSec - it.tSec);
+                        const float u = juce::jlimit(0.0f, 1.0f, age / (float) trailSec);
+
+                        const float brightnessMul = 1.0f - 0.95f * u;
+                        const float alpha = 0.42f * std::pow(1.0f - u, 2.6f);
+
+                        gg.setColour(juce::Colours::white.withMultipliedBrightness(brightnessMul).withAlpha(alpha));
+                        gg.strokePath(it.path, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    }
+
+                    gg.setColour(juce::Colours::white.withAlpha(0.10f));
+                    gg.drawLine(sb.getX(), midY, sb.getRight(), midY, 1.0f);
+
+                    gg.setColour(juce::Colours::white.withAlpha(0.92f));
+                    gg.strokePath(waveform, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    break;
+                }
+
+                case 11:
+                {
+                    drawScanlines(gg, juce::Colours::black.withAlpha(0.18f), 2);
+                    const auto green = juce::Colour::fromRGB(0x00, 0xFF, 0x66);
+
+                    gg.setColour(green.withAlpha(0.15f));
+                    gg.strokePath(waveform, juce::PathStrokeType(8.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                    gg.setColour(green.withAlpha(1.0f));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    break;
+                }
+                default:
+                {
+                    gg.setColour(juce::Colours::white.withAlpha(0.08f));
+                    gg.drawLine(sb.getX(), midY, sb.getRight(), midY, 1.0f);
+
+                    gg.setColour(juce::Colours::lime.withAlpha(0.9f));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    break;
+                }
+            }
+        }
+
+        // 中心线（大多数预设都更像示波器）
+        if (! bypassActive && preset != 10)
+        {
+            gg.setColour(juce::Colours::white.withAlpha(0.06f));
+            gg.drawLine(sb.getX(), midY, sb.getRight(), midY, 1.0f);
+        }
+
+        // TV Glitch：统一叠加层
+        auto applyGlitch = [&](const juce::Path& wave, bool hasWave)
+        {
+            const int ms = (int) juce::Time::getMillisecondCounter();
+            const float seconds = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
+
+            const int burstPeriod = 150 + preset * 17;
+            const int burstMod = 7 + (preset % 5);
+            const bool burst = (((ms / burstPeriod) % burstMod) == (preset % burstMod));
+
+            float amount = juce::jlimit(0.18f, 1.0f, 0.32f + 0.055f * (float) preset + (burst ? 0.45f : 0.0f));
+
+            juce::Random rng ((int) (ms ^ (preset * 0x9E3779B9)));
+
+            auto rollBar = [&](float speed, juce::Colour c, float alpha)
+            {
+                const float phase = std::fmod(seconds * speed, 1.0f);
+                const float y = sb.getY() + phase * sb.getHeight();
+                const float h = 6.0f + 40.0f * amount;
+
+                juce::ColourGradient grad(c.withAlpha(0.0f), sb.getX(), y - h,
+                                          c.withAlpha(alpha), sb.getX(), y,
+                                          false);
+                grad.addColour(0.70, c.withAlpha(0.0f));
+                gg.setGradientFill(grad);
+                gg.fillRect(sb.getX(), y - h, sb.getWidth(), h * 2.0f);
+            };
+
+            auto tearStrips = [&](int count, float maxDx, bool colorful)
+            {
+                for (int i = 0; i < count; ++i)
+                {
+                    const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                    const float h = 1.5f + rng.nextFloat() * (8.0f + 22.0f * amount);
+                    const float dx = (rng.nextFloat() - 0.5f) * maxDx;
+
+                    gg.setColour(juce::Colours::black.withAlpha(0.05f * amount));
+                    gg.fillRect(sb.getX(), y, sb.getWidth(), h);
+
+                    if (colorful)
+                        gg.setColour(juce::Colour::fromHSV(rng.nextFloat(), 0.95f, 1.0f, 0.12f * amount));
+                    else
+                        gg.setColour(juce::Colours::white.withAlpha(0.06f * amount));
+                    gg.fillRect(sb.getX() + dx, y, sb.getWidth(), h);
+
+                    gg.setColour(juce::Colours::white.withAlpha(0.04f * amount));
+                    gg.drawLine(sb.getX(), y, sb.getRight(), y, 1.0f);
+                }
+            };
+
+            auto macroBlocks = [&](int count, float bwMax, float bhMax, bool tinted)
+            {
+                for (int i = 0; i < count; ++i)
+                {
+                    const float bw = 3.0f + rng.nextFloat() * bwMax;
+                    const float bh = 2.0f + rng.nextFloat() * bhMax;
+                    const float x = sb.getX() + rng.nextFloat() * (sb.getWidth() - bw);
+                    const float y = sb.getY() + rng.nextFloat() * (sb.getHeight() - bh);
+
+                    const bool dark = (rng.nextFloat() < 0.45f);
+                    if (dark)
+                        gg.setColour(juce::Colours::black.withAlpha(0.10f * amount));
+                    else if (tinted)
+                        gg.setColour(juce::Colour::fromHSV(rng.nextFloat(), 0.85f, 1.0f, 0.09f * amount));
+                    else
+                        gg.setColour(juce::Colours::white.withAlpha(0.07f * amount));
+
+                    gg.fillRect(x, y, bw, bh);
+
+                    if (burst && rng.nextFloat() < 0.25f)
+                    {
+                        gg.setColour(juce::Colours::white.withAlpha(0.05f));
+                        gg.drawRect(juce::Rectangle<float>(x, y, bw, bh), 1.0f);
+                    }
+                }
+            };
+
+            auto rgbSplitWave = [&](float off, float alpha)
+            {
+                if (! hasWave)
+                    return;
+
+                juce::Path pr = wave; pr.applyTransform(juce::AffineTransform::translation(+off, 0.0f));
+                juce::Path pb = wave; pb.applyTransform(juce::AffineTransform::translation(-off, 0.0f));
+
+                gg.setColour(juce::Colours::red.withAlpha(alpha));
+                gg.strokePath(pr, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                gg.setColour(juce::Colours::deepskyblue.withAlpha(alpha));
+                gg.strokePath(pb, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            };
+
+            auto grain = [&](int dots, juce::Colour c, float a)
+            {
+                gg.setColour(c.withAlpha(a));
                 for (int i = 0; i < dots; ++i)
                 {
-                    const float x = b.getX() + rng.nextFloat() * b.getWidth();
-                    const float y = b.getY() + rng.nextFloat() * b.getHeight();
-                    g.fillRect(x, y, 1.0f, 1.0f);
+                    const float x = sb.getX() + rng.nextFloat() * sb.getWidth();
+                    const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                    gg.fillRect(x, y, 1.0f, 1.0f);
                 }
-                break;
-            }
-            case 9: // 霓虹紫：阴影 + 主线
+            };
+
+            switch (preset)
             {
-                const auto purp = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF);
-                juce::Path shadow = waveform;
-                shadow.applyTransform(juce::AffineTransform::translation(2.0f, 2.0f));
+                case 1:
+                {
+                    rollBar(0.30f, juce::Colour::fromRGB(0x9A, 0xE6, 0xFF), 0.12f * amount);
+                    tearStrips(2 + (burst ? 6 : 2), 40.0f + 120.0f * amount, true);
+                    rgbSplitWave(0.8f + 3.8f * amount, 0.09f * amount);
+                    grain(80 + (int) (220 * amount), juce::Colours::white, 0.03f * amount);
+                    break;
+                }
+                case 2:
+                {
+                    const float y = sb.getBottom() - (8.0f + 18.0f * (0.5f + 0.5f * std::sin(seconds * 1.7f)));
+                    gg.setColour(juce::Colours::white.withAlpha(0.12f * amount));
+                    gg.fillRect(sb.getX(), y, sb.getWidth(), 2.0f + 4.0f * amount);
 
-                g.setColour(juce::Colours::black.withAlpha(0.60f));
-                g.strokePath(shadow, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    tearStrips(1 + (burst ? 7 : 3), 60.0f + 160.0f * amount, false);
+                    rgbSplitWave(0.5f + 2.0f * amount, 0.06f * amount);
+                    grain(120 + (int) (260 * amount), juce::Colours::white, 0.02f * amount);
+                    break;
+                }
+                case 3:
+                {
+                    rollBar(0.18f, juce::Colour::fromHSV(std::fmod(seconds * 0.3f, 1.0f), 1.0f, 1.0f, 1.0f), 0.10f * amount);
+                    tearStrips(3 + (burst ? 10 : 4), 90.0f + 220.0f * amount, true);
+                    macroBlocks(8 + (int) (26 * amount), 60.0f + 90.0f * amount, 18.0f + 20.0f * amount, true);
+                    if (burst) rgbSplitWave(1.5f + 6.0f * amount, 0.10f);
+                    break;
+                }
+                case 4:
+                {
+                    macroBlocks(18 + (int) (55 * amount), 22.0f + 50.0f * amount, 10.0f + 22.0f * amount, false);
+                    tearStrips(1 + (burst ? 6 : 1), 30.0f + 90.0f * amount, false);
+                    if (burst) grain(400 + (int) (600 * amount), juce::Colours::white, 0.03f);
+                    break;
+                }
+                case 5:
+                {
+                    rollBar(0.22f, juce::Colour::fromRGB(0x00, 0xFF, 0xC6), 0.10f * amount);
+                    macroBlocks(10 + (int) (20 * amount), 90.0f + 130.0f * amount, 30.0f + 30.0f * amount, true);
 
-                g.setColour(purp.withAlpha(0.20f));
-                g.strokePath(waveform, juce::PathStrokeType(7.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    if (hasWave)
+                    {
+                        for (int i = 0; i < (burst ? 6 : 3); ++i)
+                        {
+                            const float ox = (rng.nextFloat() - 0.5f) * (8.0f + 30.0f * amount);
+                            const float oy = (rng.nextFloat() - 0.5f) * (6.0f + 24.0f * amount);
+                            juce::Path ghost = wave;
+                            ghost.applyTransform(juce::AffineTransform::translation(ox, oy));
+                            gg.setColour(juce::Colours::white.withAlpha(0.04f * amount));
+                            gg.strokePath(ghost, juce::PathStrokeType(6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                        }
+                    }
 
-                g.setColour(purp.withAlpha(1.0f));
-                g.strokePath(waveform, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                break;
+                    tearStrips(2 + (burst ? 8 : 2), 70.0f + 160.0f * amount, true);
+                    break;
+                }
+                case 6:
+                {
+                    gg.setColour(juce::Colours::black.withAlpha(0.16f * amount));
+                    for (float y = sb.getY(); y <= sb.getBottom(); y += 2.0f)
+                        gg.drawLine(sb.getX(), y, sb.getRight(), y, 1.0f);
+
+                    tearStrips(2 + (burst ? 5 : 2), 80.0f + 180.0f * amount, false);
+                    rgbSplitWave(0.9f + 3.0f * amount, 0.07f * amount);
+                    break;
+                }
+                case 7:
+                {
+                    // 降噪：macroBlocks 很容易盖住波形，这里改为更轻的撕裂条
+                    if (burst)
+                        tearStrips(1 + (int) (4 * amount), 220.0f, true);
+                    else
+                        tearStrips(1, 120.0f, true);
+                    break;
+                }
+                case 8:
+                {
+                    // 降噪：去掉大量 grain，保留少量水平亮线
+                    for (int i = 0; i < 2 + (int) (5 * amount); ++i)
+                    {
+                        const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                        const float x1 = sb.getX();
+                        const float x2 = sb.getRight();
+                        gg.setColour(juce::Colours::white.withAlpha(0.015f + 0.03f * amount));
+                        gg.drawLine(x1, y, x2, y, 1.0f);
+                    }
+                    if (burst)
+                        tearStrips(1, 120.0f, false);
+                    break;
+                }
+                case 9:
+                {
+                    // 降噪：降低 CRT tile 覆盖强度，避免影响波形清晰度
+                    const int step = (int) juce::jlimit(2.0f, 6.0f, 6.0f - 3.0f * amount);
+                    auto getCrtTile = [&](int s) -> const juce::Image&
+                    {
+                        static juce::Image img;
+                        if (! img.isValid() || img.getWidth() != s * 3)
+                        {
+                            img = juce::Image(juce::Image::ARGB, s * 3, s, true);
+                            juce::Image::BitmapData bd(img, juce::Image::BitmapData::readWrite);
+                            for (int y = 0; y < s; ++y)
+                            {
+                                bd.setPixelColour(0, y, juce::Colours::red);
+                                bd.setPixelColour(1, y, juce::Colours::green);
+                                bd.setPixelColour(2, y, juce::Colours::blue);
+                            }
+                        }
+                        return img;
+                    };
+
+                    const auto& tile = getCrtTile(step);
+                    const int ox = (int) (sb.getX() + std::fmod(seconds * (18.0f + 35.0f * amount), (float) (step * 3)));
+                    const int oy = (int) (sb.getY() + std::fmod(seconds * (6.0f + 10.0f * amount), (float) step));
+                    gg.setTiledImageFill(tile, ox, oy, 0.008f * amount);
+                    gg.fillRect(sb);
+
+                    rollBar(0.16f, juce::Colour::fromRGB(0xB7, 0x4D, 0xFF), 0.05f * amount);
+                    tearStrips(1 + (burst ? 5 : 1), 90.0f + 160.0f * amount, true);
+                    rgbSplitWave(0.6f + 2.2f * amount, 0.05f * amount);
+                    break;
+                }
+                case 10:
+                {
+                    // 降噪：去掉 macroBlocks，仅保留轻微撕裂/滚动条
+                    if (burst)
+                        rollBar(0.18f, juce::Colours::white, 0.08f);
+                    tearStrips(1, 50.0f + 70.0f * amount, false);
+                    break;
+                }
+
+                case 11:
+                {
+                    rollBar(0.12f, juce::Colour::fromRGB(0x00, 0xFF, 0x66), 0.10f * amount);
+                    // 去掉闪烁矩形块（太干扰波形可读性），保留撕裂/色分离
+                    tearStrips(2 + (burst ? 8 : 2), 80.0f + 200.0f * amount, false);
+                    if (burst && hasWave)
+                        rgbSplitWave(2.0f + 5.0f * amount, 0.08f);
+                    break;
+                }
+
+                default:
+                {
+                    rollBar(0.22f, juce::Colours::white, 0.10f * amount);
+                    tearStrips(2 + (int) (5 * amount), 80.0f + 150.0f * amount, true);
+                    macroBlocks(10 + (int) (30 * amount), 60.0f + 100.0f * amount, 20.0f + 20.0f * amount, true);
+                    rgbSplitWave(0.8f + 3.0f * amount, 0.06f * amount);
+                    break;
+                }
             }
-            case 10: // 极简白线（细、干净）
+        };
+
+        if (! owner.processor.bypassed)
+            applyGlitch(waveform, ! bypassActive);
+
+        // --- 预设切换动画 ---
+        const float pt = owner.getPresetTransitionT();
+        if (pt > 0.0f)
+        {
+            const float e = pt * pt * (3.0f - 2.0f * pt);
+            const float inv = 1.0f - e;
+
+            juce::Random rng ((int) juce::Time::getMillisecondCounter() ^ (preset * 0xBADC0DE));
+
+            const float edgeBoost = juce::jlimit(0.0f, 1.0f, (std::abs(pt - 0.5f) * 2.0f));
+            const float snowAmount = (0.12f + 0.28f * inv) * (0.35f + 0.65f * edgeBoost);
+            gg.setColour(juce::Colours::white.withAlpha(snowAmount));
+            const int snowDots = 450 + (int) (1200 * inv);
+            for (int i = 0; i < snowDots; ++i)
             {
-                g.setColour(juce::Colours::white.withAlpha(0.10f));
-                g.drawLine(b.getX(), midY, b.getRight(), midY, 1.0f);
-
-                g.setColour(juce::Colours::white.withAlpha(0.92f));
-                g.strokePath(waveform, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                break;
+                const float x = sb.getX() + rng.nextFloat() * sb.getWidth();
+                const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                gg.fillRect(x, y, 1.0f, 1.0f);
             }
-            case 11: // 绿屏：扫描线 + 绿色辉光
+
+            const float rollY = sb.getY() + std::fmod((float) (juce::Time::getMillisecondCounterHiRes() * 0.001 * 0.95), 1.0f) * sb.getHeight();
+            juce::ColourGradient roll(juce::Colours::white.withAlpha(0.0f), sb.getX(), rollY - 40.0f,
+                                      juce::Colours::white.withAlpha(0.12f * inv), sb.getX(), rollY,
+                                      false);
+            roll.addColour(0.60, juce::Colours::white.withAlpha(0.0f));
+            gg.setGradientFill(roll);
+            gg.fillRect(sb.getX(), rollY - 40.0f, sb.getWidth(), 80.0f);
+
+            const float wipe = juce::jlimit(0.0f, 1.0f, (pt < 0.5f ? pt * 2.0f : (1.0f - pt) * 2.0f));
+            const float barH = sb.getHeight() * (0.10f + 0.35f * wipe);
+            gg.setColour(juce::Colours::black.withAlpha(0.35f * inv));
+            gg.fillRect(sb.getX(), sb.getCentreY() - barH * 0.5f, sb.getWidth(), barH);
+
+            const int blocks = 6 + (int) (22 * inv);
+            for (int i = 0; i < blocks; ++i)
             {
-                drawScanlines(juce::Colours::black.withAlpha(0.18f), 2);
-                const auto green = juce::Colour::fromRGB(0x00, 0xFF, 0x66);
-
-                g.setColour(green.withAlpha(0.15f));
-                g.strokePath(waveform, juce::PathStrokeType(8.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-                g.setColour(green.withAlpha(1.0f));
-                g.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                break;
+                const float bw = 8.0f + rng.nextFloat() * (70.0f * inv);
+                const float bh = 6.0f + rng.nextFloat() * (35.0f * inv);
+                const float x = sb.getX() + rng.nextFloat() * (sb.getWidth() - bw);
+                const float y = sb.getY() + rng.nextFloat() * (sb.getHeight() - bh);
+                const bool dark = (rng.nextFloat() < 0.55f);
+                gg.setColour((dark ? juce::Colours::black : juce::Colours::white).withAlpha(0.10f * inv));
+                gg.fillRect(x, y, bw, bh);
             }
-            default:
+        }
+
+        // --- 电视开关机动画 ---
+        const float t = owner.getBypassTransitionT();
+        if (t > 0.0f)
+        {
+            const bool toBypass = owner.bypassTransitionToOn;
+            const float e = t * t * (3.0f - 2.0f * t);
+            const float k = toBypass ? e : (1.0f - e);
+
+            juce::Random rng ((int) juce::Time::getMillisecondCounter());
+            const float flicker = 0.75f + 0.25f * rng.nextFloat();
+
+            gg.setColour(juce::Colours::white.withAlpha(0.18f * (1.0f - k) * flicker));
+            gg.drawLine(sb.getX(), sb.getCentreY(), sb.getRight(), sb.getCentreY(), 2.0f + 2.0f * (1.0f - k));
+
+            const int strips = 1 + (int) std::round(6.0f * (1.0f - k));
+            for (int i = 0; i < strips; ++i)
             {
-                g.setColour(juce::Colours::white.withAlpha(0.08f));
-                g.drawLine(b.getX(), midY, b.getRight(), midY, 1.0f);
-
-                g.setColour(juce::Colours::lime.withAlpha(0.9f));
-                g.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                break;
+                const float y = sb.getY() + rng.nextFloat() * sb.getHeight();
+                const float hh = 1.5f + rng.nextFloat() * (10.0f + 22.0f * (1.0f - k));
+                const float dx = (rng.nextFloat() - 0.5f) * (40.0f + 220.0f * (1.0f - k));
+                gg.setColour(juce::Colours::black.withAlpha(0.08f * (1.0f - k)));
+                gg.fillRect(sb.getX(), y, sb.getWidth(), hh);
+                gg.setColour(juce::Colour::fromHSV(rng.nextFloat(), 0.95f, 1.0f, 0.08f * (1.0f - k)));
+                gg.fillRect(sb.getX() + dx, y, sb.getWidth(), hh);
             }
+
+            if (t < 0.12f)
+            {
+                const float flash = (1.0f - (t / 0.12f));
+                gg.setColour(juce::Colours::white.withAlpha(0.10f * flash));
+                gg.fillRect(sb);
+            }
+
+            gg.setColour(juce::Colours::black.withAlpha(0.55f * (1.0f - k)));
+            gg.fillRect(sb);
+        }
+
+        // 边框线（离屏也画一遍；最终 warp 后还能保持统一）
+        gg.setColour(juce::Colours::white.withAlpha(0.10f));
+        gg.drawRoundedRectangle(sb.reduced(0.5f), corner, 1.0f);
+    }
+
+    // ============================================================
+    // 2) 生成“每一行的左右偏移”序列：随机噪声 -> 窗口平均 -> 时间平滑
+    //    每个 preset 使用不同参数（强度/窗口/更新速率），让预设更有区别。
+    // ============================================================
+
+    const int ms = (int) juce::Time::getMillisecondCounter();
+    juce::Random rng ((int) (ms ^ (preset * 0x6A09E667)));
+
+    const auto& presetParams = display_present::getPresetParams(preset);
+    const auto& warpParams = presetParams.warp;
+
+    float maxOffsetPx = warpParams.maxOffsetPx;
+    int windowRadius = warpParams.windowRadius;
+    float updateProb = warpParams.updateProb;
+    float temporalSmooth = warpParams.temporalSmooth;
+
+    // bypass 时减弱扭曲（更像屏幕熄灭/稳定）
+    if (bypassActive)
+        maxOffsetPx *= 0.25f;
+
+    // 偶尔整屏“同步撕裂”一下（更像老电视/录像带）
+    const float globalKickProb = warpParams.globalKickProbBase + warpParams.globalKickProbPerPreset * (float) preset;
+    const bool globalKick = (rng.nextFloat() < globalKickProb);
+    const float globalKickDx = globalKick ? (rng.nextFloat() - 0.5f) * maxOffsetPx * 1.8f : 0.0f;
+
+    // 1) 更新原始噪声（按概率更新，让画面更有“信号噪声的持续性”）
+    const bool doUpdate = (rng.nextFloat() < updateProb) || (ms % 17 == 0) || globalKick;
+    if (doUpdate)
+    {
+        // 让噪声在垂直方向上也有一点“块状相关性”，避免每行完全独立显得太电子
+        const int block = juce::jlimit(1, 14,
+                                       warpParams.blockBase + (preset % warpParams.blockPresetMod)
+                                       + windowRadius / 3);
+        for (int y = 0; y < H;)
+        {
+            const float v = (rng.nextFloat() - 0.5f) * 2.0f; // [-1, +1]
+            const int y2 = juce::jmin(H, y + block);
+            for (int yy = y; yy < y2; ++yy)
+                scanlineNoiseRaw[(size_t) yy] = v;
+            y = y2;
         }
     }
 
-    // 中心线（大多数预设都更像示波器）
-    if (! bypassActive && preset != 10)
+    // 2) 窗口平均（box blur）
+    for (int y = 0; y < H; ++y)
     {
-        g.setColour(juce::Colours::white.withAlpha(0.06f));
-        g.drawLine(b.getX(), midY, b.getRight(), midY, 1.0f);
+        float acc = 0.0f;
+        int cnt = 0;
+        const int y0 = juce::jmax(0, y - windowRadius);
+        const int y1 = juce::jmin(H - 1, y + windowRadius);
+        for (int yy = y0; yy <= y1; ++yy)
+        {
+            acc += scanlineNoiseRaw[(size_t) yy];
+            ++cnt;
+        }
+        const float avg = (cnt > 0 ? acc / (float) cnt : 0.0f);
+
+        // 3) 时间平滑
+        scanlineNoiseSmoothed[(size_t) y] = temporalSmooth * scanlineNoiseSmoothed[(size_t) y]
+                                          + (1.0f - temporalSmooth) * avg;
+
+        // 转换为像素偏移：加入一个轻微的正弦漂移，让“同步噪声”更像模拟信号
+        const float seconds = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
+        const float drift = warpParams.driftAmp
+                          * std::sin(seconds * (warpParams.driftFreqBase + warpParams.driftFreqPerPreset * (float) preset)
+                                    + (float) y * warpParams.driftYMul);
+        scanlineOffsetPx[(size_t) y] = (scanlineNoiseSmoothed[(size_t) y] + drift) * maxOffsetPx + globalKickDx;
+
     }
 
-    // TV Glitch：作为所有预设的统一“疯狂”质感叠加层（不改变基础仍是波形）
-    auto applyGlitch = [&](const juce::Path& wave, bool hasWave)
+    // ============================================================
+    // 3) Remap：按行把 screenBase 采样到 screenWarp
+    //    这里只做左右偏移（电视行同步噪声特征）。
+    // ============================================================
+
     {
-        const int ms = (int) juce::Time::getMillisecondCounter();
-        const float seconds = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
+        juce::Image::BitmapData src(screenBase, juce::Image::BitmapData::readOnly);
+        juce::Image::BitmapData dst(screenWarp, juce::Image::BitmapData::writeOnly);
 
-        // 每个 preset 都有自己节奏（周期/爆发点不同）
-        const int burstPeriod = 150 + preset * 17;
-        const int burstMod = 7 + (preset % 5);
-        const bool burst = (((ms / burstPeriod) % burstMod) == (preset % burstMod));
-
-        // 强度：每个 preset 各自偏置 + burst 加成
-        float amount = juce::jlimit(0.18f, 1.0f, 0.32f + 0.055f * (float) preset + (burst ? 0.45f : 0.0f));
-
-        juce::Random rng ((int) (ms ^ (preset * 0x9E3779B9)));
-
-        auto rollBar = [&](float speed, juce::Colour c, float alpha)
+        for (int y = 0; y < H; ++y)
         {
-            const float phase = std::fmod(seconds * speed, 1.0f);
-            const float y = b.getY() + phase * b.getHeight();
-            const float h = 6.0f + 40.0f * amount;
+            const float dxRow = scanlineOffsetPx[(size_t) y];
+            auto* out = reinterpret_cast<juce::PixelARGB*> (dst.getLinePointer(y));
 
-            juce::ColourGradient grad(c.withAlpha(0.0f), b.getX(), y - h,
-                                      c.withAlpha(alpha), b.getX(), y,
-                                      false);
-            grad.addColour(0.70, c.withAlpha(0.0f));
-            g.setGradientFill(grad);
-            g.fillRect(b.getX(), y - h, b.getWidth(), h * 2.0f);
-        };
+            // source y 固定（只做横向 remap）
+            const auto* in = reinterpret_cast<const juce::PixelARGB*> (src.getLinePointer(y));
 
-        auto tearStrips = [&](int count, float maxDx, bool colorful)
-        {
-            for (int i = 0; i < count; ++i)
+            for (int x = 0; x < W; ++x)
             {
-                const float y = b.getY() + rng.nextFloat() * b.getHeight();
-                const float h = 1.5f + rng.nextFloat() * (8.0f + 22.0f * amount);
-                const float dx = (rng.nextFloat() - 0.5f) * maxDx;
+                const float sx = (float) x - dxRow;
 
-                g.setColour(juce::Colours::black.withAlpha(0.05f * amount));
-                g.fillRect(b.getX(), y, b.getWidth(), h);
-
-                if (colorful)
-                    g.setColour(juce::Colour::fromHSV(rng.nextFloat(), 0.95f, 1.0f, 0.12f * amount));
-                else
-                    g.setColour(juce::Colours::white.withAlpha(0.06f * amount));
-                g.fillRect(b.getX() + dx, y, b.getWidth(), h);
-
-                g.setColour(juce::Colours::white.withAlpha(0.04f * amount));
-                g.drawLine(b.getX(), y, b.getRight(), y, 1.0f);
-            }
-        };
-
-        auto macroBlocks = [&](int count, float bwMax, float bhMax, bool tinted)
-        {
-            for (int i = 0; i < count; ++i)
-            {
-                const float bw = 3.0f + rng.nextFloat() * bwMax;
-                const float bh = 2.0f + rng.nextFloat() * bhMax;
-                const float x = b.getX() + rng.nextFloat() * (b.getWidth() - bw);
-                const float y = b.getY() + rng.nextFloat() * (b.getHeight() - bh);
-
-                const bool dark = (rng.nextFloat() < 0.45f);
-                if (dark)
-                    g.setColour(juce::Colours::black.withAlpha(0.10f * amount));
-                else if (tinted)
-                    g.setColour(juce::Colour::fromHSV(rng.nextFloat(), 0.85f, 1.0f, 0.09f * amount));
-                else
-                    g.setColour(juce::Colours::white.withAlpha(0.07f * amount));
-
-                g.fillRect(x, y, bw, bh);
-
-                if (burst && rng.nextFloat() < 0.25f)
+                if (sx <= 0.0f)
                 {
-                    g.setColour(juce::Colours::white.withAlpha(0.05f));
-                    g.drawRect(juce::Rectangle<float>(x, y, bw, bh), 1.0f);
+                    out[x] = in[0];
+                    continue;
                 }
-            }
-        };
-
-        auto rgbSplitWave = [&](float off, float alpha)
-        {
-            if (! hasWave)
-                return;
-
-            juce::Path pr = wave; pr.applyTransform(juce::AffineTransform::translation(+off, 0.0f));
-            juce::Path pb = wave; pb.applyTransform(juce::AffineTransform::translation(-off, 0.0f));
-
-            g.setColour(juce::Colours::red.withAlpha(alpha));
-            g.strokePath(pr, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-            g.setColour(juce::Colours::deepskyblue.withAlpha(alpha));
-            g.strokePath(pb, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-        };
-
-        auto grain = [&](int dots, juce::Colour c, float a)
-        {
-            g.setColour(c.withAlpha(a));
-            for (int i = 0; i < dots; ++i)
-            {
-                const float x = b.getX() + rng.nextFloat() * b.getWidth();
-                const float y = b.getY() + rng.nextFloat() * b.getHeight();
-                g.fillRect(x, y, 1.0f, 1.0f);
-            }
-        };
-
-        // 每个预设不同的 glitch 配方（尽量差异化）
-        switch (preset)
-        {
-            case 1: // Digital RGB split + fine tears
-            {
-                rollBar(0.30f, juce::Colour::fromRGB(0x9A, 0xE6, 0xFF), 0.12f * amount);
-                tearStrips(2 + (burst ? 6 : 2), 40.0f + 120.0f * amount, true);
-                rgbSplitWave(0.8f + 3.8f * amount, 0.09f * amount);
-                grain(80 + (int) (220 * amount), juce::Colours::white, 0.03f * amount);
-                break;
-            }
-            case 2: // VHS tracking（底部跟踪线 + 轻微横向波动）
-            {
-                // tracking 线
-                const float y = b.getBottom() - (8.0f + 18.0f * (0.5f + 0.5f * std::sin(seconds * 1.7f)));
-                g.setColour(juce::Colours::white.withAlpha(0.12f * amount));
-                g.fillRect(b.getX(), y, b.getWidth(), 2.0f + 4.0f * amount);
-
-                // 上下两条“磁带错位”
-                tearStrips(1 + (burst ? 7 : 3), 60.0f + 160.0f * amount, false);
-                rgbSplitWave(0.5f + 2.0f * amount, 0.06f * amount);
-                grain(120 + (int) (260 * amount), juce::Colours::white, 0.02f * amount);
-                break;
-            }
-            case 3: // Rainbow tearing + 彩色条纹
-            {
-                rollBar(0.18f, juce::Colour::fromHSV(std::fmod(seconds * 0.3f, 1.0f), 1.0f, 1.0f, 1.0f), 0.10f * amount);
-                tearStrips(3 + (burst ? 10 : 4), 90.0f + 220.0f * amount, true);
-                macroBlocks(8 + (int) (26 * amount), 60.0f + 90.0f * amount, 18.0f + 20.0f * amount, true);
-                if (burst) rgbSplitWave(1.5f + 6.0f * amount, 0.10f);
-                break;
-            }
-            case 4: // Pixel dropout（像素/块损坏）
-            {
-                macroBlocks(18 + (int) (55 * amount), 22.0f + 50.0f * amount, 10.0f + 22.0f * amount, false);
-                tearStrips(1 + (burst ? 6 : 1), 30.0f + 90.0f * amount, false);
-                if (burst) grain(400 + (int) (600 * amount), juce::Colours::white, 0.03f);
-                break;
-            }
-            case 5: // Bloom smear（大面积发光拖影 + 轻块）
-            {
-                rollBar(0.22f, juce::Colour::fromRGB(0x00, 0xFF, 0xC6), 0.10f * amount);
-                macroBlocks(10 + (int) (20 * amount), 90.0f + 130.0f * amount, 30.0f + 30.0f * amount, true);
-
-                if (hasWave)
+                if (sx >= (float) (W - 1))
                 {
-                    for (int i = 0; i < (burst ? 6 : 3); ++i)
-                    {
-                        const float ox = (rng.nextFloat() - 0.5f) * (8.0f + 30.0f * amount);
-                        const float oy = (rng.nextFloat() - 0.5f) * (6.0f + 24.0f * amount);
-                        juce::Path ghost = wave;
-                        ghost.applyTransform(juce::AffineTransform::translation(ox, oy));
-                        g.setColour(juce::Colours::white.withAlpha(0.04f * amount));
-                        g.strokePath(ghost, juce::PathStrokeType(6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                    }
+                    out[x] = in[W - 1];
+                    continue;
                 }
 
-                tearStrips(2 + (burst ? 8 : 2), 70.0f + 160.0f * amount, true);
-                break;
-            }
-            case 6: // Interlace jitter（隔行扫描 + 行偏移）
-            {
-                // 强扫描线
-                g.setColour(juce::Colours::black.withAlpha(0.16f * amount));
-                for (float y = b.getY(); y <= b.getBottom(); y += 2.0f)
-                    g.drawLine(b.getX(), y, b.getRight(), y, 1.0f);
+                const int x0 = (int) sx;
+                const int x1 = x0 + 1;
+                const float tLerp = sx - (float) x0;
 
-                // 少量粗 tear
-                tearStrips(2 + (burst ? 5 : 2), 80.0f + 180.0f * amount, false);
-                rgbSplitWave(0.9f + 3.0f * amount, 0.07f * amount);
-                break;
-            }
-            case 7: // Compression macroblocks（大块马赛克）
-            {
-                macroBlocks(14 + (int) (30 * amount), 140.0f + 180.0f * amount, 70.0f + 60.0f * amount, true);
-                if (burst)
-                    tearStrips(1 + (int) (5 * amount), 220.0f, true);
-                break;
-            }
-            case 8: // Static storm（雪花风暴 + 随机亮线）
-            {
-                grain(900 + (int) (1800 * amount), juce::Colours::white, 0.025f + 0.025f * amount);
-                for (int i = 0; i < 6 + (int) (14 * amount); ++i)
+                const auto p0 = in[x0].getNativeARGB();
+                const auto p1 = in[x1].getNativeARGB();
+
+                const auto a0 = (int) ((p0 >> 24) & 0xFF);
+                const auto r0 = (int) ((p0 >> 16) & 0xFF);
+                const auto g0 = (int) ((p0 >>  8) & 0xFF);
+                const auto b0 = (int) ((p0 >>  0) & 0xFF);
+
+                const auto a1 = (int) ((p1 >> 24) & 0xFF);
+                const auto r1 = (int) ((p1 >> 16) & 0xFF);
+                const auto g1 = (int) ((p1 >>  8) & 0xFF);
+                const auto b1 = (int) ((p1 >>  0) & 0xFF);
+
+                auto lerp8 = [&](int v0, int v1)
                 {
-                    const float y = b.getY() + rng.nextFloat() * b.getHeight();
-                    const float x1 = b.getX();
-                    const float x2 = b.getRight();
-                    g.setColour(juce::Colours::white.withAlpha(0.02f + 0.05f * amount));
-                    g.drawLine(x1, y, x2, y, 1.0f);
-                }
-                if (burst)
-                    macroBlocks(10, 80.0f, 20.0f, false);
-                break;
-            }
-            case 9: // CRT mask（彩色点阵/三色条 + 轻 tearing）
-            {
-                // 模拟三色荧光点：使用“缓存的小 tile + tiled fill”替代逐像素 fillRect，避免在 preset 9 上卡顿
-                const int step = (int) juce::jlimit(2.0f, 6.0f, 6.0f - 3.0f * amount);
-                auto getCrtTile = [&](int s) -> const juce::Image&
-                {
-                    static juce::Image tiles[7];
-                    s = juce::jlimit(2, 6, s);
-                    auto& img = tiles[s];
-                    if (! img.isValid())
-                    {
-                        img = juce::Image(juce::Image::ARGB, s * 3, s, true);
-                        juce::Image::BitmapData bd(img, juce::Image::BitmapData::writeOnly);
-                        bd.setPixelColour(0, 0, juce::Colours::red);
-                        bd.setPixelColour(1, 0, juce::Colours::green);
-                        bd.setPixelColour(2, 0, juce::Colours::blue);
-                    }
-                    return img;
+                    const float vv = (1.0f - tLerp) * (float) v0 + tLerp * (float) v1;
+                    return (juce::uint8) juce::jlimit(0, 255, (int) std::round(vv));
                 };
 
-                const auto& tile = getCrtTile(step);
-                const int ox = (int) (b.getX() + std::fmod(seconds * (18.0f + 35.0f * amount), (float) (step * 3)));
-                const int oy = (int) (b.getY() + std::fmod(seconds * (6.0f + 10.0f * amount), (float) step));
-                g.setTiledImageFill(tile, ox, oy, 0.02f * amount);
-                g.fillRect(b);
-
-                rollBar(0.16f, juce::Colour::fromRGB(0xB7, 0x4D, 0xFF), 0.08f * amount);
-                tearStrips(2 + (burst ? 7 : 2), 90.0f + 180.0f * amount, true);
-                rgbSplitWave(0.7f + 3.0f * amount, 0.06f * amount);
-                break;
+                out[x].setARGB(lerp8(a0, a1), lerp8(r0, r1), lerp8(g0, g1), lerp8(b0, b1));
             }
-            case 10: // Minimal glitch（偶发，一条 tracking + 轻块）
-            {
-                if (burst)
-                {
-                    rollBar(0.20f, juce::Colours::white, 0.10f);
-                    tearStrips(2, 120.0f, false);
-                    macroBlocks(6, 120.0f, 26.0f, false);
-                }
-                else
-                {
-                    tearStrips(1, 50.0f, false);
-                }
-                break;
-            }
-            case 11: // Green corruption（绿色字符化/腐蚀块）
-            {
-                rollBar(0.12f, juce::Colour::fromRGB(0x00, 0xFF, 0x66), 0.10f * amount);
-                // 绿色“数据块”
-                for (int i = 0; i < 14 + (int) (40 * amount); ++i)
-                {
-                    const float w = 2.0f + rng.nextFloat() * (18.0f + 30.0f * amount);
-                    const float h = 2.0f + rng.nextFloat() * (10.0f + 24.0f * amount);
-                    const float x = b.getX() + rng.nextFloat() * (b.getWidth() - w);
-                    const float y = b.getY() + rng.nextFloat() * (b.getHeight() - h);
-                    const bool bright = (rng.nextFloat() < 0.35f);
-                    g.setColour(juce::Colour::fromRGB(0x00, (juce::uint8) (bright ? 255 : 140), 0x66).withAlpha(0.04f + 0.08f * amount));
-                    g.fillRect(x, y, w, h);
-                }
-                tearStrips(2 + (burst ? 8 : 2), 80.0f + 200.0f * amount, false);
-                if (burst && hasWave)
-                    rgbSplitWave(2.0f + 5.0f * amount, 0.08f);
-                break;
-            }
-            default: // fallback：通用混合
-            {
-                rollBar(0.22f, juce::Colours::white, 0.10f * amount);
-                tearStrips(2 + (int) (5 * amount), 80.0f + 150.0f * amount, true);
-                macroBlocks(10 + (int) (30 * amount), 60.0f + 100.0f * amount, 20.0f + 20.0f * amount, true);
-                rgbSplitWave(0.8f + 3.0f * amount, 0.06f * amount);
-                break;
-            }
-        }
-    };
-
-    // 所有预设统一叠加 glitch（在开关机动画之前绘制，动画会盖住它）
-    if (! owner.processor.bypassed)
-        applyGlitch(waveform, ! bypassActive);
-
-    // --- 预设切换动画：换台/调谐风格的过渡（不需要缓存前一帧） ---
-    const float pt = owner.getPresetTransitionT();
-    if (pt > 0.0f)
-    {
-        // smoothstep easing
-        const float e = pt * pt * (3.0f - 2.0f * pt);
-        const float inv = 1.0f - e;
-
-        juce::Random rng ((int) juce::Time::getMillisecondCounter() ^ (preset * 0xBADC0DE));
-
-        // 1) 静电噪声爆发（开始/结束更强）
-        const float edgeBoost = juce::jlimit(0.0f, 1.0f, (std::abs(pt - 0.5f) * 2.0f));
-        const float snowAmount = (0.12f + 0.28f * inv) * (0.35f + 0.65f * edgeBoost);
-        g.setColour(juce::Colours::white.withAlpha(snowAmount));
-        const int snowDots = 450 + (int) (1200 * inv);
-        for (int i = 0; i < snowDots; ++i)
-        {
-            const float x = b.getX() + rng.nextFloat() * b.getWidth();
-            const float y = b.getY() + rng.nextFloat() * b.getHeight();
-            g.fillRect(x, y, 1.0f, 1.0f);
-        }
-
-        // 2) 亮的“同步线/扫条”从上往下滚
-        const float rollY = b.getY() + std::fmod((float) (juce::Time::getMillisecondCounterHiRes() * 0.001 * 0.95), 1.0f) * b.getHeight();
-        juce::ColourGradient roll(juce::Colours::white.withAlpha(0.0f), b.getX(), rollY - 40.0f,
-                                  juce::Colours::white.withAlpha(0.12f * inv), b.getX(), rollY,
-                                  false);
-        roll.addColour(0.60, juce::Colours::white.withAlpha(0.0f));
-        g.setGradientFill(roll);
-        g.fillRect(b.getX(), rollY - 40.0f, b.getWidth(), 80.0f);
-
-        // 3) 换台遮罩：黑条快速擦除
-        const float wipe = juce::jlimit(0.0f, 1.0f, (pt < 0.5f ? pt * 2.0f : (1.0f - pt) * 2.0f));
-        const float barH = b.getHeight() * (0.10f + 0.35f * wipe);
-        g.setColour(juce::Colours::black.withAlpha(0.35f * inv));
-        g.fillRect(b.getX(), b.getCentreY() - barH * 0.5f, b.getWidth(), barH);
-
-        // 4) 少量 macroblock（像数字信号切换时的压缩块）
-        const int blocks = 6 + (int) (22 * inv);
-        for (int i = 0; i < blocks; ++i)
-        {
-            const float bw = 8.0f + rng.nextFloat() * (70.0f * inv);
-            const float bh = 6.0f + rng.nextFloat() * (35.0f * inv);
-            const float x = b.getX() + rng.nextFloat() * (b.getWidth() - bw);
-            const float y = b.getY() + rng.nextFloat() * (b.getHeight() - bh);
-            const bool dark = (rng.nextFloat() < 0.55f);
-            g.setColour((dark ? juce::Colours::black : juce::Colours::white).withAlpha(0.10f * inv));
-            g.fillRect(x, y, bw, bh);
         }
     }
 
-    // --- 电视开关机动画（覆盖在波形显示区中间） ---
-    // 逻辑：
-    // - 关机：先压缩成一条水平亮线 -> 再收缩成一个亮点 -> 熄灭
-    // - 开机：反向
-    const float t = owner.getBypassTransitionT();
-    if (t > 0.0f)
-    {
-        const bool toBypass = owner.bypassTransitionToOn;
-        // smoothstep：更像“啪”的感觉，同时避免僵硬线性
-        const float e = t * t * (3.0f - 2.0f * t);
-        const float k = toBypass ? e : (1.0f - e);
-
-        // 亮度抖动/闪烁
-        juce::Random rng ((int) juce::Time::getMillisecondCounter());
-        const float flicker = 0.75f + 0.25f * rng.nextFloat();
-
-        // 注意：不再绘制“矩形放大缩小”的画面压缩动画，只保留故障感效果。
-
-        // 扫描闪烁
-        g.setColour(juce::Colours::white.withAlpha(0.18f * (1.0f - k) * flicker));
-        g.drawLine(b.getX(), b.getCentreY(), b.getRight(), b.getCentreY(), 2.0f + 2.0f * (1.0f - k));
-
-        // 故障撕裂条（动画期间随机出现几条）
-        const int strips = 1 + (int) std::round(6.0f * (1.0f - k));
-        for (int i = 0; i < strips; ++i)
-        {
-            const float y = b.getY() + rng.nextFloat() * b.getHeight();
-            const float hh = 1.5f + rng.nextFloat() * (10.0f + 22.0f * (1.0f - k));
-            const float dx = (rng.nextFloat() - 0.5f) * (40.0f + 220.0f * (1.0f - k));
-            g.setColour(juce::Colours::black.withAlpha(0.08f * (1.0f - k)));
-            g.fillRect(b.getX(), y, b.getWidth(), hh);
-            g.setColour(juce::Colour::fromHSV(rng.nextFloat(), 0.95f, 1.0f, 0.08f * (1.0f - k)));
-            g.fillRect(b.getX() + dx, y, b.getWidth(), hh);
-        }
-
-        // 短暂白闪（更像电视啪一下）
-        if (t < 0.12f)
-        {
-            const float flash = (1.0f - (t / 0.12f));
-            g.setColour(juce::Colours::white.withAlpha(0.10f * flash));
-            g.fillRect(b);
-        }
-
-        // 动画期间压暗背景（让开关机更明显）
-        g.setColour(juce::Colours::black.withAlpha(0.55f * (1.0f - k)));
-        g.fillRect(b);
-    }
-
-    // 画边框（在 clipState 作用域内是裁剪的，仍然安全）
-    g.setColour(juce::Colours::white.withAlpha(0.10f));
-    g.drawRoundedRectangle(b.reduced(0.5f), corner, 1.0f);
+    // ============================================================
+    // 4) 把扭曲后的图像画到最终屏幕区域 b
+    // ============================================================
+    g.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);
+    g.drawImage(screenWarp,
+                b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+                0, 0, W, H,
+                false);
 }
 
 LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& p)

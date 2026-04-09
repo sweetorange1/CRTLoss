@@ -1,6 +1,8 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>
+#include <cmath>
 
 LDSJvstAudioProcessor::LDSJvstAudioProcessor()
     : juce::AudioProcessor (BusesProperties()
@@ -12,11 +14,186 @@ LDSJvstAudioProcessor::LDSJvstAudioProcessor()
 #endif
     )
 {
+    initLossPresets();
+    lossMask.fill(1);
+    activeLossBandCount = 0;
+    lossRandom.setSeedRandomly();
 }
 
 LDSJvstAudioProcessor::~LDSJvstAudioProcessor() {}
 
+void LDSJvstAudioProcessor::initLossPresets()
+{
+    for (auto& preset : lossPresets)
+    {
+        preset.probabilities.fill(0.50f);
+        preset.retriggerSeconds = 0.50;
+    }
+
+    // 0: 全频段均匀 50%，0.5s 重触发（你描述的示例）
+    lossPresets[0].probabilities.fill(0.50f);
+    lossPresets[0].retriggerSeconds = 0.01;
+
+    // 1: 低频保留概率更高
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const float t = (float) i / (float) (kLossBandCount - 1);
+        lossPresets[1].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, 0.88f - 0.68f * t);
+    }
+    lossPresets[1].retriggerSeconds = 0.18;
+
+    // 2: 高频保留概率更高
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const float t = (float) i / (float) (kLossBandCount - 1);
+        lossPresets[2].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, 0.15f + 0.75f * t);
+    }
+    lossPresets[2].retriggerSeconds = 0.12;
+
+    // 3: 中频优先（钟形）
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const float t = (float) i / (float) (kLossBandCount - 1);
+        const float d = (t - 0.5f) / 0.22f;
+        lossPresets[3].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, 0.18f + 0.72f * std::exp(-(d * d)));
+    }
+    lossPresets[3].retriggerSeconds = 0.08;
+
+    // 4: 梳状分布
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const bool comb = ((i % 6) < 3);
+        lossPresets[4].probabilities[(size_t) i] = comb ? 0.82f : 0.18f;
+    }
+    lossPresets[4].retriggerSeconds = 0.09;
+
+    // 5: 低频+中高频双峰
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const float t = (float) i / (float) (kLossBandCount - 1);
+        const float d1 = (t - 0.20f) / 0.12f;
+        const float d2 = (t - 0.78f) / 0.16f;
+        const float v = 0.10f + 0.42f * std::exp(-(d1 * d1)) + 0.50f * std::exp(-(d2 * d2));
+        lossPresets[5].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, v);
+    }
+    lossPresets[5].retriggerSeconds = 0.14;
+
+    // 6: 周期波动分布
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const float t = (float) i / (float) (kLossBandCount - 1);
+        const float v = 0.5f + 0.38f * std::sin(2.0f * juce::MathConstants<float>::pi * (t * 3.0f + 0.1f));
+        lossPresets[6].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, v);
+    }
+    lossPresets[6].retriggerSeconds = 0.07;
+
+    // 7: 稀疏窄峰
+    lossPresets[7].probabilities.fill(0.10f);
+    for (int c : { 8, 19, 31, 46, 59, 73, 88, 96 })
+        for (int k = -1; k <= 1; ++k)
+            if (const int idx = c + k; idx >= 0 && idx < kLossBandCount)
+                lossPresets[7].probabilities[(size_t) idx] = (k == 0 ? 0.92f : 0.55f);
+    lossPresets[7].retriggerSeconds = 0.05;
+
+    // 8: 稳定轻丢失
+    lossPresets[8].probabilities.fill(0.72f);
+    lossPresets[8].retriggerSeconds = 0.30;
+
+    // 9: 激进丢失
+    lossPresets[9].probabilities.fill(0.26f);
+    lossPresets[9].retriggerSeconds = 0.06;
+
+    // 10: 低频稳定+高频随机
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const float t = (float) i / (float) (kLossBandCount - 1);
+        lossPresets[10].probabilities[(size_t) i] = (t < 0.35f ? 0.85f : 0.20f + 0.50f * t);
+    }
+    lossPresets[10].retriggerSeconds = 0.11;
+
+    // 11: 高频稳定+低频随机
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const float t = (float) i / (float) (kLossBandCount - 1);
+        lossPresets[11].probabilities[(size_t) i] = (t > 0.65f ? 0.86f : 0.18f + 0.55f * (1.0f - t));
+    }
+    lossPresets[11].retriggerSeconds = 0.10;
+}
+
+float LDSJvstAudioProcessor::getLossBandCenterHz(int bandIndex) noexcept
+{
+    const float lo = 20.0f;
+    const float hi = 20000.0f;
+    const float n = (float) juce::jlimit(0, kLossBandCount - 1, bandIndex);
+    const float t = n / (float) (kLossBandCount - 1);
+    return lo * std::pow(hi / lo, t);
+}
+
+void LDSJvstAudioProcessor::ensureLossFilters(double sampleRate)
+{
+    if (sampleRate <= 0.0)
+        return;
+
+    if (sampleRate == currentSampleRateForLoss)
+        return;
+
+    currentSampleRateForLoss = sampleRate;
+
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        auto& fl = lossBandNotchL[(size_t) i];
+        auto& fr = lossBandNotchR[(size_t) i];
+
+        const float nyquistSafe = (float) (sampleRate * 0.45);
+        const float f = juce::jlimit(20.0f, juce::jmax(20.0f, nyquistSafe), getLossBandCenterHz(i));
+        const float q = 5.5f;
+
+        fl.reset();
+        fr.reset();
+        fl.setCoefficients(juce::IIRCoefficients::makeNotchFilter(sampleRate, f, q));
+        fr.setCoefficients(juce::IIRCoefficients::makeNotchFilter(sampleRate, f, q));
+
+    }
+}
+
+void LDSJvstAudioProcessor::retriggerLossMask(double nowSeconds)
+{
+    const int preset = juce::jlimit(0, 11, getDisplayPresetIndex());
+    const auto& lp = lossPresets[(size_t) preset];
+
+    activeLossBandCount = 0;
+
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        const float p = juce::jlimit(0.0f, 1.0f, lp.probabilities[(size_t) i]);
+        const bool keep = lossRandom.nextFloat() < p;
+        lossMask[(size_t) i] = keep ? (uint8_t) 1 : (uint8_t) 0;
+
+        if (keep)
+            activeLossBands[(size_t) activeLossBandCount++] = i;
+    }
+
+    // 兜底：至少保留一个频段，避免完全静音
+    if (activeLossBandCount <= 0)
+    {
+        const int idx = lossRandom.nextInt(kLossBandCount);
+        lossMask[(size_t) idx] = 1;
+        activeLossBands[0] = idx;
+        activeLossBandCount = 1;
+    }
+
+    droppedLossBandCount = 0;
+    for (int i = 0; i < kLossBandCount; ++i)
+    {
+        if (lossMask[(size_t) i] == 0)
+            droppedLossBands[(size_t) droppedLossBandCount++] = i;
+    }
+
+    nextLossRetriggerSeconds = nowSeconds + juce::jmax(0.01, lp.retriggerSeconds);
+}
+
 bool LDSJvstAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+
 {
 #if JucePlugin_IsMidiEffect
     juce::ignoreUnused (layouts);
@@ -37,11 +214,23 @@ bool LDSJvstAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 #endif
 }
 
-void LDSJvstAudioProcessor::prepareToPlay(double, int)
+void LDSJvstAudioProcessor::prepareToPlay(double sampleRate, int)
 {
     const juce::SpinLock::ScopedLockType sl(oscilloscopeLock);
     std::fill(oscilloscopeBuffer.begin(), oscilloscopeBuffer.end(), 0.0f);
     oscilloscopeWritePos = 0;
+
+    ensureLossFilters(sampleRate);
+
+    lossTimeSeconds = 0.0;
+    nextLossRetriggerSeconds = 0.0;
+    lastLossPresetIndex = juce::jlimit(0, 11, getDisplayPresetIndex());
+    activeLossBandCount = 0;
+    droppedLossBandCount = 0;
+    lossMask.fill(1);
+
+    retriggerLossMask(lossTimeSeconds);
+
 }
 
 void LDSJvstAudioProcessor::releaseResources() {}
@@ -113,8 +302,56 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     }
 
     // ============================================================
-    // 3) 硬削波 Hard Clip：保证输出不超过 0dBFS（[-1, +1]）
+    // 3) 频带随机丢失：20Hz~20kHz 划分为 100 段，按当前预设概率矩阵 + 触发周期重随机
+    //    实现方式：对“未命中保留”的频段施加窄带 Notch，从而模拟该段频率信息丢失
     // ============================================================
+
+    ensureLossFilters(getSampleRate());
+
+    const int currentPreset = juce::jlimit(0, 11, getDisplayPresetIndex());
+    if (currentPreset != lastLossPresetIndex)
+    {
+        lastLossPresetIndex = currentPreset;
+        retriggerLossMask(lossTimeSeconds);
+    }
+
+    const double blockSeconds = (double) buffer.getNumSamples() / juce::jmax(1.0, getSampleRate());
+    lossTimeSeconds += blockSeconds;
+
+    if (lossTimeSeconds >= nextLossRetriggerSeconds)
+        retriggerLossMask(lossTimeSeconds);
+
+    if (droppedLossBandCount > 0)
+    {
+        if (totalNumOutputChannels > 0)
+        {
+            auto* left = buffer.getWritePointer(0);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                float x = left[i];
+                for (int n = 0; n < droppedLossBandCount; ++n)
+                    x = lossBandNotchL[(size_t) droppedLossBands[(size_t) n]].processSingleSampleRaw(x);
+                left[i] = x;
+            }
+        }
+
+        if (totalNumOutputChannels > 1)
+        {
+            auto* right = buffer.getWritePointer(1);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                float x = right[i];
+                for (int n = 0; n < droppedLossBandCount; ++n)
+                    x = lossBandNotchR[(size_t) droppedLossBands[(size_t) n]].processSingleSampleRaw(x);
+                right[i] = x;
+            }
+        }
+    }
+
+    // ============================================================
+    // 4) 最终 0dB 硬削波：防止电平过高
+    // ============================================================
+
     for (int ch = 0; ch < totalNumOutputChannels; ++ch)
     {
         auto* d = buffer.getWritePointer(ch);
@@ -125,6 +362,7 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     // 示例波形：抓取主输出的第0通道（反映最终输出）
     if (totalNumOutputChannels > 0)
         pushSamplesToOscilloscope(buffer.getReadPointer(0), buffer.getNumSamples());
+
 }
 
 juce::AudioProcessorEditor* LDSJvstAudioProcessor::createEditor() { return new LDSJvstAudioProcessorEditor(*this); }
@@ -146,7 +384,8 @@ void LDSJvstAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     juce::ValueTree state("LDSJvstState");
     state.setProperty("version", 1, nullptr);
-    state.setProperty("preset", displayPresetIndex, nullptr);
+    state.setProperty("preset", getDisplayPresetIndex(), nullptr);
+
     state.setProperty("bypassed", bypassed ? 1 : 0, nullptr);
     state.setProperty("preGainDb", (double) getPreGainDb(), nullptr);
     state.setProperty("limiterThreshold", (double) getLimiterThreshold(), nullptr);

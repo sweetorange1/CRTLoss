@@ -15,34 +15,34 @@ public:
     void resized() override;
 
 private:
-    static constexpr int baseEditorWidth  = 700;
-    static constexpr int baseEditorHeight = 525;
+    static constexpr int baseEditorWidth  = 1000;
+    static constexpr int baseEditorHeight = 750;
 
-    static constexpr int screenX = 75;
-    static constexpr int screenY = 84;
-    static constexpr int screenW = 450;
-    static constexpr int screenH = 370;
+    static constexpr int screenX = 107;
+    static constexpr int screenY = 120;
+    static constexpr int screenW = 643;
+    static constexpr int screenH = 529;
 
     static constexpr float editorAspectRatio = (float) baseEditorWidth / (float) baseEditorHeight;
 
     static constexpr int presetCount = 12;
-    static constexpr int presetLightX = 580;
-    static constexpr int presetLightY = 110;
-    static constexpr int presetLightSize = 12;
-    static constexpr int presetLightGap = 7;
+    static constexpr int presetLightX = 829;
+    static constexpr int presetLightY = 157;
+    static constexpr int presetLightSize = 17;
+    static constexpr int presetLightGap = 10;
 
     // bypass 触发区域（按基准尺寸布局，resized() 里会按比例缩放）
-    static constexpr int bypassX = 600;
-    static constexpr int bypassY = 433;
-    static constexpr int bypassW = 65;
-    static constexpr int bypassH = 37;
+    static constexpr int bypassX = 857;
+    static constexpr int bypassY = 619;
+    static constexpr int bypassW = 93;
+    static constexpr int bypassH = 53;
 
     // 遥控器（按基准尺寸布局，超出编辑器边界部分自动裁剪）
-    static constexpr int remoteX = 232;
-    static constexpr int remoteY = 471;
+    static constexpr int remoteX = 782;
+    static constexpr int remoteY = 684;
     static constexpr int remoteW = 168;
     static constexpr int remoteH = 488;
-    static constexpr int remoteLift = 342; // 拿出来时向上平移
+    static constexpr int remoteLift = 415; // 拿出来时向上平移（684 -> 269）
 
     // 遥控器上的 bypass 按钮（相对遥控器图片左上角的偏移，按基准尺寸）
     // 用户给的基准坐标：左上角(305,416) 大小 68*10（此坐标对应“遥控器被拿出来”后的界面位置）
@@ -202,13 +202,24 @@ private:
         explicit RemoteControlOverlay (LDSJvstAudioProcessorEditor& ownerEditor)
             : owner (ownerEditor)
         {
-            setInterceptsMouseClicks(false, false);
-            owner.addMouseListener(this, true);
+            setInterceptsMouseClicks(true, true);
         }
 
-        ~RemoteControlOverlay() override
+        ~RemoteControlOverlay() override = default;
+
+        bool hitTest (int x, int y) override
         {
-            owner.removeMouseListener(this);
+            // 遥控器“拿出来/动画中”时：作为一个 modal 覆盖层，阻止底下的按钮/指示灯被误触。
+            if (owner.remotePulledOut || owner.getRemotePullAmount() > 0.001f)
+                return true;
+
+            // 收回状态：只在遥控器区域拦截点击（用于点一下把遥控器拿出来）。
+            const float scale = (float) getWidth() / (float) baseEditorWidth;
+            const float rx = remoteX * scale;
+            const float ry = (remoteY - remoteLift * owner.getRemotePullAmount()) * scale;
+            const float rw = remoteW * scale;
+            const float rh = remoteH * scale;
+            return juce::Rectangle<float>(rx, ry, rw, rh).contains((float) x, (float) y);
         }
 
         void paint (juce::Graphics& g) override;
@@ -221,6 +232,14 @@ private:
         void mouseUp (const juce::MouseEvent& e) override;
 
         int remotePressedButtonIndex = -1;
+
+        // VOL+/VOL- 按住自动连发（模拟电视机按住持续调节）
+        bool volumeRepeatActive = false;
+        int volumeRepeatDir = 0; // +1 = VOL+，-1 = VOL-
+        double volumeRepeatPressSeconds = 0.0;
+        double volumeRepeatLastStepSeconds = 0.0;
+        static constexpr double volumeRepeatInitialDelaySeconds = 0.32;
+        static constexpr double volumeRepeatIntervalSeconds = 0.075;
 
         LDSJvstAudioProcessorEditor& owner;
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RemoteControlOverlay)
@@ -257,6 +276,14 @@ private:
     static constexpr double presetTransitionDurationSeconds = 0.26;
 
     float getPresetTransitionT() noexcept;
+
+    // 前置增益（遥控器 VOL+/VOL-）+ 电视屏幕 OSD 控制条
+    void nudgePreGainDbFromUI (float deltaDb);
+    float getVolumeOsdT() noexcept; // 0..1（时间进度），0 表示不显示
+
+    bool volumeOsdActive = false;
+    double volumeOsdStartSeconds = 0.0;
+    static constexpr double volumeOsdDurationSeconds = 3.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LDSJvstAudioProcessorEditor)
 };

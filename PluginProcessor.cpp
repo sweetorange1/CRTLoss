@@ -51,7 +51,9 @@ void LDSJvstAudioProcessor::pushSamplesToOscilloscope(const float* samples, int 
     if (samples == nullptr || numSamples <= 0)
         return;
 
-    const juce::SpinLock::ScopedLockType sl(oscilloscopeLock);
+    const juce::SpinLock::ScopedTryLockType sl(oscilloscopeLock);
+    if (! sl.isLocked())
+        return;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -64,7 +66,9 @@ void LDSJvstAudioProcessor::getOscilloscopeSnapshot(juce::Array<float>& dest)
 {
     dest.resize(oscilloscopeBufferSize);
 
-    const juce::SpinLock::ScopedLockType sl(oscilloscopeLock);
+    const juce::SpinLock::ScopedTryLockType sl(oscilloscopeLock);
+    if (! sl.isLocked())
+        return;
 
     // 以 writePos 作为“最新数据之后的位置”，从旧到新拷贝
     for (int i = 0; i < oscilloscopeBufferSize; ++i)
@@ -85,10 +89,27 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear(i, 0, buffer.getNumSamples());
 
-    // 作为基础框架：暂不做音频处理，默认直通（buffer保持原样）
+    // ============================================================
+    // 1) 前置增益（dB）
+    // ============================================================
+    const float db = getPreGainDb();
+    const float g = juce::Decibels::decibelsToGain(db);
 
-    // 示例波形：抓取主输入的第0通道
-    if (totalNumInputChannels > 0)
+    if (g != 1.0f)
+        buffer.applyGain(g);
+
+    // ============================================================
+    // 2) 硬削波 Hard Clip：保证输出不超过 0dBFS（[-1, +1]）
+    // ============================================================
+    for (int ch = 0; ch < totalNumOutputChannels; ++ch)
+    {
+        auto* d = buffer.getWritePointer(ch);
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+            d[i] = juce::jlimit(-1.0f, 1.0f, d[i]);
+    }
+
+    // 示例波形：抓取主输出的第0通道（反映最终输出）
+    if (totalNumOutputChannels > 0)
         pushSamplesToOscilloscope(buffer.getReadPointer(0), buffer.getNumSamples());
 }
 
@@ -107,8 +128,40 @@ void LDSJvstAudioProcessor::setCurrentProgram(int) {}
 const juce::String LDSJvstAudioProcessor::getProgramName(int) { return {}; }
 void LDSJvstAudioProcessor::changeProgramName(int, const juce::String&) {}
 
-void LDSJvstAudioProcessor::getStateInformation(juce::MemoryBlock&) {}
-void LDSJvstAudioProcessor::setStateInformation(const void*, int) {}
+void LDSJvstAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
+{
+    juce::ValueTree state("LDSJvstState");
+    state.setProperty("version", 1, nullptr);
+    state.setProperty("preset", displayPresetIndex, nullptr);
+    state.setProperty("bypassed", bypassed ? 1 : 0, nullptr);
+    state.setProperty("preGainDb", (double) getPreGainDb(), nullptr);
+
+    if (auto xml = state.createXml())
+        copyXmlToBinary(*xml, destData);
+}
+
+void LDSJvstAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
+{
+    if (data == nullptr || sizeInBytes <= 0)
+        return;
+
+    std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
+    if (xmlState == nullptr)
+        return;
+
+    const juce::ValueTree state = juce::ValueTree::fromXml(*xmlState);
+    if (! state.isValid())
+        return;
+
+    // 兼容未来可能的类型调整
+    if (! state.hasType("LDSJvstState"))
+        return;
+
+    setDisplayPresetIndex((int) state.getProperty("preset", 0));
+    bypassed = ((int) state.getProperty("bypassed", 0)) != 0;
+
+    setPreGainDb((float) (double) state.getProperty("preGainDb", 4.0));
+}
 
 // 插件入口实现
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

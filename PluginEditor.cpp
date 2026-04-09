@@ -1289,6 +1289,89 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             gg.fillRect(sb);
         }
 
+        // 音量 OSD：画在屏幕上方（基准坐标：左上(135,129) 大小 340*35）
+        // 注意：这里处于“屏幕组件局部坐标系”，所以将基准坐标映射到 sb(0..W/H)
+        const float osdT = owner.getVolumeOsdT();
+        if (osdT > 0.0f)
+        {
+            // 前段全亮，尾段淡出
+            const float fade = 1.0f - juce::jlimit(0.0f, 1.0f, (osdT - 0.80f) / 0.20f);
+
+            const float minDb = LDSJvstAudioProcessor::kPreGainDbMin;
+            const float maxDb = LDSJvstAudioProcessor::kPreGainDbMax;
+            const float curDb = owner.processor.getPreGainDb();
+            const float u = juce::jlimit(0.0f, 1.0f, (curDb - minDb) / (maxDb - minDb));
+
+            // 将“基准坐标”转换到屏幕局部坐标（screen: 107,120,643,529）
+            const float ox = sb.getWidth()  * (86.0f  / 643.0f); // 193 - 107
+            const float oy = sb.getHeight() * (64.0f  / 529.0f); // 184 - 120
+            const float ow = sb.getWidth()  * (486.0f / 643.0f);
+            const float oh = sb.getHeight() * (50.0f  / 529.0f);
+
+            const auto outer = juce::Rectangle<float>(sb.getX() + ox, sb.getY() + oy, ow, oh);
+            const auto inner = outer.reduced(6.0f, 6.0f);
+
+            const auto& presetParams = display_present::getPresetParams(preset);
+
+            juce::Colour accent;
+            switch (presetParams.bg.kind)
+            {
+                case display_present::BackgroundKind::digitalGrid:         accent = juce::Colour::fromRGB(0x9A, 0xE6, 0xFF); break;
+                case display_present::BackgroundKind::amberVignette:       accent = juce::Colour::fromRGB(0xFF, 0xB0, 0x00); break;
+                case display_present::BackgroundKind::radarSweep:          accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
+                case display_present::BackgroundKind::phosphorBloom:       accent = juce::Colour::fromRGB(0x00, 0xFF, 0xC6); break;
+                case display_present::BackgroundKind::rainbowInterference: accent = juce::Colour::fromHSV(std::fmod((float) (juce::Time::getMillisecondCounterHiRes() * 0.001 * 0.18), 1.0f), 0.95f, 1.0f, 1.0f); break;
+                case display_present::BackgroundKind::dotMask:             accent = juce::Colour::fromRGB(0xFF, 0x4D, 0xB7); break;
+                case display_present::BackgroundKind::oceanBlobs:          accent = juce::Colour::fromRGB(0x4D, 0xB7, 0xFF); break;
+                case display_present::BackgroundKind::mirrorCross:         accent = juce::Colour::fromRGB(0x00, 0xFF, 0x66); break;
+                case display_present::BackgroundKind::barcode:             accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
+                case display_present::BackgroundKind::glitchStatic:        accent = juce::Colours::white; break;
+                case display_present::BackgroundKind::neonStarfield:       accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
+                case display_present::BackgroundKind::minimalVignette:     accent = juce::Colours::white; break;
+                case display_present::BackgroundKind::greenTerminal:       accent = juce::Colour::fromRGB(0x00, 0xFF, 0x66); break;
+                case display_present::BackgroundKind::legacySolid:
+                default:                                                  accent = juce::Colours::white; break;
+            }
+
+            // 背板（带一点预设色调）
+            gg.setColour(juce::Colours::black.withAlpha(0.55f * fade));
+            gg.fillRoundedRectangle(outer, 6.0f);
+            gg.setColour(accent.withAlpha(0.10f * fade));
+            gg.fillRoundedRectangle(outer, 6.0f);
+
+            // 外框
+            gg.setColour(accent.withAlpha(0.28f * fade));
+            gg.drawRoundedRectangle(outer, 6.0f, 1.0f);
+
+            // 刻度（10 段）
+            const int ticks = 10;
+            gg.setColour(accent.withAlpha(0.12f * fade));
+            for (int i = 1; i < ticks; ++i)
+            {
+                const float tx = inner.getX() + inner.getWidth() * ((float) i / (float) ticks);
+                gg.drawLine(tx, inner.getY(), tx, inner.getBottom(), 1.0f);
+            }
+
+            // 填充条
+            auto fill = inner;
+            fill.setWidth(inner.getWidth() * u);
+            gg.setColour(accent.withAlpha(0.85f * fade));
+            gg.fillRect(fill);
+
+            // 文本：VOL + 数值（dB）
+            const float fontSize = juce::jlimit(10.0f, 16.0f, outer.getHeight() * 0.60f);
+            gg.setFont(juce::Font(fontSize, juce::Font::bold));
+
+            const juce::String label = "VOL";
+            const juce::String value = juce::String(curDb >= 0.0f ? "+" : "") + juce::String(curDb, 0) + "dB";
+
+            gg.setColour(juce::Colours::black.withAlpha(0.65f * fade));
+            gg.drawText(label + " " + value, outer.translated(1.0f, 1.0f), juce::Justification::centred, true);
+
+            gg.setColour(accent.withAlpha(0.95f * fade));
+            gg.drawText(label + " " + value, outer, juce::Justification::centred, true);
+        }
+
         // 边框线（离屏也画一遍；最终 warp 后还能保持统一）
         gg.setColour(juce::Colours::white.withAlpha(0.10f));
         gg.drawRoundedRectangle(sb.reduced(0.5f), corner, 1.0f);
@@ -1461,11 +1544,19 @@ LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& 
         addAndMakeVisible(light);
     }
 
+    // 从宿主恢复的 state 里读取预设选择（如果没有则为默认 0）
+    selectedPresetIndex = juce::jlimit(0, presetCount - 1, processor.getDisplayPresetIndex());
+
     if (resizableCorner != nullptr)
         resizableCorner->toFront(false);
 
     // 某些宿主在初次打开时不会立刻触发 resized()，这里强制布局一次，确保默认就能看到指示灯
     resized();
+
+    // 让指示灯立刻反映当前预设
+    for (auto* light : presetLights)
+        if (light != nullptr)
+            light->repaint();
 }
 
 LDSJvstAudioProcessorEditor::~LDSJvstAudioProcessorEditor() {}
@@ -1529,6 +1620,35 @@ float LDSJvstAudioProcessorEditor::getPresetTransitionT() noexcept
     return juce::jlimit(0.0f, 1.0f, t);
 }
 
+void LDSJvstAudioProcessorEditor::nudgePreGainDbFromUI (float deltaDb)
+{
+    processor.addPreGainDb(deltaDb);
+
+    // 触发一次 OSD 显示
+    volumeOsdActive = true;
+    volumeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
+    oscilloscope.repaint();
+}
+
+float LDSJvstAudioProcessorEditor::getVolumeOsdT() noexcept
+{
+    if (! volumeOsdActive)
+        return 0.0f;
+
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    const double dt = now - volumeOsdStartSeconds;
+    const float t = (float) (dt / volumeOsdDurationSeconds);
+
+    if (t >= 1.0f)
+    {
+        volumeOsdActive = false;
+        return 0.0f;
+    }
+
+    return juce::jlimit(0.0f, 1.0f, t);
+}
+
 void LDSJvstAudioProcessorEditor::setSelectedPresetIndex (int newIndex)
 {
     newIndex = juce::jlimit(0, presetCount - 1, newIndex);
@@ -1542,6 +1662,7 @@ void LDSJvstAudioProcessorEditor::setSelectedPresetIndex (int newIndex)
     presetTransitionStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
     selectedPresetIndex = newIndex;
+    processor.setDisplayPresetIndex(newIndex);
 
     for (auto* light : presetLights)
         if (light != nullptr)
@@ -1612,6 +1733,9 @@ void LDSJvstAudioProcessorEditor::setRemotePulledOut (bool shouldBePulledOut)
     remotePullAnimTo = target;
     remotePullAnimStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
+    // 遥控器拿出来时，让它永远在最上层（避免被指示灯/热区覆盖），同时也避免底下元素被误操作。
+    remoteOverlay.toFront(false);
+
     remoteOverlay.beginAnimation();
     remoteOverlay.repaint();
 }
@@ -1645,7 +1769,35 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::timerCallback()
         needRepaint = true;
     }
 
-    // 2) 遥控器按下态：不需要持续刷新（mouseDown/mouseUp 会触发 repaint）
+    // 2) VOL+/VOL- 按住自动连发
+    // - mouseDown 时先立刻变化 1 次
+    // - 按住超过 initialDelay 后，每 interval 继续变化
+    if (volumeRepeatActive)
+    {
+        // 若按下态已经被清掉（例如 mouseUp 先于 timer 到达），确保停止
+        if (remotePressedButtonIndex < 0 || volumeRepeatDir == 0)
+        {
+            volumeRepeatActive = false;
+            volumeRepeatDir = 0;
+        }
+        else
+        {
+            const double held = now - volumeRepeatPressSeconds;
+            if (held >= volumeRepeatInitialDelaySeconds)
+            {
+                const double dtStep = now - volumeRepeatLastStepSeconds;
+                if (dtStep >= volumeRepeatIntervalSeconds)
+                {
+                    owner.nudgePreGainDbFromUI((float) volumeRepeatDir);
+                    volumeRepeatLastStepSeconds = now;
+                }
+            }
+
+            stillNeeded = true; // 需要保持 timer 继续跑
+        }
+    }
+
+    // 3) 遥控器按下态：不需要持续刷新（mouseDown/mouseUp 会触发 repaint）
     // 这里不做额外处理，避免按住时因为持续 repaint 造成“闪烁感”。
 
     if (needRepaint)
@@ -1683,37 +1835,37 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::paint (juce::Graphics& g
         bool isBypass;
     };
 
-    // 坐标来源：用户给的是“遥控器被拿出来”时的界面坐标。
-    // 我们转换成相对遥控器图片左上角的偏移：offset = abs - (remoteX, remoteY-remoteLift)
+    // 说明：这里的坐标是“相对遥控器图片左上角”的偏移（不依赖 remoteX/remoteY），
+    // 避免移动遥控器位置/基准尺寸后，按钮热区错位。
     static constexpr RemoteButton buttons[] = {
-        { "BYPASS", remoteBypassOffsetX, remoteBypassOffsetY, remoteBypassW, remoteBypassH, true },
+        { "BYPASS", 73, 287, remoteBypassW, remoteBypassH, true },
 
         // 数字按钮
-        { "数字1",  260 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字2",  305 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字3",  350 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字4",  260 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字5",  305 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字6",  350 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字7",  260 - remoteX, 261 - (remoteY - remoteLift), 23, 10, false },
-        { "数字8",  305 - remoteX, 261 - (remoteY - remoteLift), 23, 10, false },
-        { "数字9",  350 - remoteX, 260 - (remoteY - remoteLift), 23, 10, false },
-        { "数字0",  350 - remoteX, 291 - (remoteY - remoteLift), 23, 10, false },
+        { "数字1",  28,  71, 23, 10, false },
+        { "数字2",  73,  71, 23, 10, false },
+        { "数字3", 118,  71, 23, 10, false },
+        { "数字4",  28, 101, 23, 10, false },
+        { "数字5",  73, 101, 23, 10, false },
+        { "数字6", 118, 101, 23, 10, false },
+        { "数字7",  28, 132, 23, 10, false },
+        { "数字8",  73, 132, 23, 10, false },
+        { "数字9", 118, 131, 23, 10, false },
+        { "数字0", 118, 162, 23, 10, false },
 
         // 功能键
-        { "TV",      261 - remoteX, 297 - (remoteY - remoteLift), 23, 10, false },
-        { "SLEEP",   261 - remoteX, 327 - (remoteY - remoteLift), 23, 10, false },
-        { "RECALL",  261 - remoteX, 357 - (remoteY - remoteLift), 23, 10, false },
-        { "ST/SAP",  261 - remoteX, 387 - (remoteY - remoteLift), 23, 10, false },
-        { "MUTE",    261 - remoteX, 416 - (remoteY - remoteLift), 23, 10, false },
+        { "TV",      29, 168, 23, 10, false },
+        { "SLEEP",   29, 198, 23, 10, false },
+        { "RECALL",  29, 228, 23, 10, false },
+        { "ST/SAP",  29, 258, 23, 10, false },
+        { "MUTE",    29, 287, 23, 10, false },
 
         // 音量
-        { "VOL+",    305 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
-        { "VOL-",    305 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
+        { "VOL+",    73, 198, 23, 23, false },
+        { "VOL-",    73, 242, 23, 23, false },
 
         // 频道
-        { "频道增加", 350 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
-        { "频道减少", 350 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
+        { "频道增加", 118, 198, 23, 23, false },
+        { "频道减少", 118, 242, 23, 23, false },
     };
 
     if (remotePressedButtonIndex >= 0)
@@ -1754,30 +1906,30 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseDown (const juce::M
     };
 
     static constexpr RemoteButton buttons[] = {
-        { "BYPASS", remoteBypassOffsetX, remoteBypassOffsetY, remoteBypassW, remoteBypassH, true },
+        { "BYPASS", 73, 287, remoteBypassW, remoteBypassH, true },
 
-        { "数字1",  260 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字2",  305 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字3",  350 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字4",  260 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字5",  305 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字6",  350 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字7",  260 - remoteX, 261 - (remoteY - remoteLift), 23, 10, false },
-        { "数字8",  305 - remoteX, 261 - (remoteY - remoteLift), 23, 10, false },
-        { "数字9",  350 - remoteX, 260 - (remoteY - remoteLift), 23, 10, false },
-        { "数字0",  350 - remoteX, 291 - (remoteY - remoteLift), 23, 10, false },
+        { "数字1",  28,  71, 23, 10, false },
+        { "数字2",  73,  71, 23, 10, false },
+        { "数字3", 118,  71, 23, 10, false },
+        { "数字4",  28, 101, 23, 10, false },
+        { "数字5",  73, 101, 23, 10, false },
+        { "数字6", 118, 101, 23, 10, false },
+        { "数字7",  28, 132, 23, 10, false },
+        { "数字8",  73, 132, 23, 10, false },
+        { "数字9", 118, 131, 23, 10, false },
+        { "数字0", 118, 162, 23, 10, false },
 
-        { "TV",      261 - remoteX, 297 - (remoteY - remoteLift), 23, 10, false },
-        { "SLEEP",   261 - remoteX, 327 - (remoteY - remoteLift), 23, 10, false },
-        { "RECALL",  261 - remoteX, 357 - (remoteY - remoteLift), 23, 10, false },
-        { "ST/SAP",  261 - remoteX, 387 - (remoteY - remoteLift), 23, 10, false },
-        { "MUTE",    261 - remoteX, 416 - (remoteY - remoteLift), 23, 10, false },
+        { "TV",      29, 168, 23, 10, false },
+        { "SLEEP",   29, 198, 23, 10, false },
+        { "RECALL",  29, 228, 23, 10, false },
+        { "ST/SAP",  29, 258, 23, 10, false },
+        { "MUTE",    29, 287, 23, 10, false },
 
-        { "VOL+",    305 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
-        { "VOL-",    305 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
+        { "VOL+",    73, 198, 23, 23, false },
+        { "VOL-",    73, 242, 23, 23, false },
 
-        { "频道增加", 350 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
-        { "频道减少", 350 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
+        { "频道增加", 118, 198, 23, 23, false },
+        { "频道减少", 118, 242, 23, 23, false },
     };
 
     for (int i = 0; i < (int) std::size(buttons); ++i)
@@ -1793,10 +1945,35 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseDown (const juce::M
         if (r.contains(p))
         {
             remotePressedButtonIndex = i;
+
+            // VOL+/VOL-：按下立即变化一次，并进入“按住自动连发”
+            if (std::strcmp (b.name, "VOL+") == 0)
+            {
+                volumeRepeatActive = true;
+                volumeRepeatDir = +1;
+                volumeRepeatPressSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+                volumeRepeatLastStepSeconds = volumeRepeatPressSeconds;
+                owner.nudgePreGainDbFromUI(+1.0f);
+            }
+            else if (std::strcmp (b.name, "VOL-") == 0)
+            {
+                volumeRepeatActive = true;
+                volumeRepeatDir = -1;
+                volumeRepeatPressSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+                volumeRepeatLastStepSeconds = volumeRepeatPressSeconds;
+                owner.nudgePreGainDbFromUI(-1.0f);
+            }
+            else
+            {
+                volumeRepeatActive = false;
+                volumeRepeatDir = 0;
+            }
+
             beginAnimation();
             repaint();
             return;
         }
+
     }
 }
 
@@ -1823,30 +2000,30 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
     };
 
     static constexpr RemoteButton buttons[] = {
-        { "BYPASS", remoteBypassOffsetX, remoteBypassOffsetY, remoteBypassW, remoteBypassH, true },
+        { "BYPASS", 73, 287, remoteBypassW, remoteBypassH, true },
 
-        { "数字1",  260 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字2",  305 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字3",  350 - remoteX, 200 - (remoteY - remoteLift), 23, 10, false },
-        { "数字4",  260 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字5",  305 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字6",  350 - remoteX, 230 - (remoteY - remoteLift), 23, 10, false },
-        { "数字7",  260 - remoteX, 261 - (remoteY - remoteLift), 23, 10, false },
-        { "数字8",  305 - remoteX, 261 - (remoteY - remoteLift), 23, 10, false },
-        { "数字9",  350 - remoteX, 260 - (remoteY - remoteLift), 23, 10, false },
-        { "数字0",  350 - remoteX, 291 - (remoteY - remoteLift), 23, 10, false },
+        { "数字1",  28,  71, 23, 10, false },
+        { "数字2",  73,  71, 23, 10, false },
+        { "数字3", 118,  71, 23, 10, false },
+        { "数字4",  28, 101, 23, 10, false },
+        { "数字5",  73, 101, 23, 10, false },
+        { "数字6", 118, 101, 23, 10, false },
+        { "数字7",  28, 132, 23, 10, false },
+        { "数字8",  73, 132, 23, 10, false },
+        { "数字9", 118, 131, 23, 10, false },
+        { "数字0", 118, 162, 23, 10, false },
 
-        { "TV",      261 - remoteX, 297 - (remoteY - remoteLift), 23, 10, false },
-        { "SLEEP",   261 - remoteX, 327 - (remoteY - remoteLift), 23, 10, false },
-        { "RECALL",  261 - remoteX, 357 - (remoteY - remoteLift), 23, 10, false },
-        { "ST/SAP",  261 - remoteX, 387 - (remoteY - remoteLift), 23, 10, false },
-        { "MUTE",    261 - remoteX, 416 - (remoteY - remoteLift), 23, 10, false },
+        { "TV",      29, 168, 23, 10, false },
+        { "SLEEP",   29, 198, 23, 10, false },
+        { "RECALL",  29, 228, 23, 10, false },
+        { "ST/SAP",  29, 258, 23, 10, false },
+        { "MUTE",    29, 287, 23, 10, false },
 
-        { "VOL+",    305 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
-        { "VOL-",    305 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
+        { "VOL+",    73, 198, 23, 23, false },
+        { "VOL-",    73, 242, 23, 23, false },
 
-        { "频道增加", 350 - remoteX, 327 - (remoteY - remoteLift), 23, 23, false },
-        { "频道减少", 350 - remoteX, 371 - (remoteY - remoteLift), 23, 23, false },
+        { "频道增加", 118, 198, 23, 23, false },
+        { "频道减少", 118, 242, 23, 23, false },
     };
 
     // 遥控器：松手触发（release-to-trigger）
@@ -1866,11 +2043,21 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
 
         const bool releasedOnSameButton = btn.contains(p);
 
+        const bool wasVolButton = (std::strcmp (b.name, "VOL+") == 0) || (std::strcmp (b.name, "VOL-") == 0);
+
         // 松手后先清掉“按下态”
         remotePressedButtonIndex = -1;
+
+        // 结束 VOL 自动连发（VOL 的逻辑在 mouseDown 已经触发过一次，这里不再额外触发）
+        if (wasVolButton)
+        {
+            volumeRepeatActive = false;
+            volumeRepeatDir = 0;
+        }
+
         repaint();
 
-        if (releasedOnSameButton)
+        if (releasedOnSameButton && (! wasVolButton))
         {
             // BYPASS：逻辑与主界面一致
             if (b.isBypass)

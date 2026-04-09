@@ -43,17 +43,16 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseDown (const juce::
     const float midY = b.getCentreY();
     const float scaleY = b.getHeight() * 0.40f;
 
-    const float th = juce::jlimit(0.0f, 1.0f, processor.getLimiterThreshold());
-    const float yTop = midY - th * scaleY;
-    const float yBot = midY + th * scaleY;
+    // 允许用户点击显示区域任意位置来设置限制器阈值：
+    // 鼠标离中心越远，阈值越大；两根线保持上下对称。
+    const float dist = std::abs(e.position.y - midY);
+    const float th = (scaleY > 1.0f) ? juce::jlimit(0.0f, 1.0f, dist / scaleY) : 1.0f;
 
-    // 点中灰线附近才进入拖拽
-    const float hit = 7.0f;
-    if (std::abs(e.position.y - yTop) <= hit || std::abs(e.position.y - yBot) <= hit)
-    {
-        limiterDragActive = true;
-        limiterDragStartThreshold = th;
-    }
+    processor.setLimiterThreshold(th);
+
+    // 立即进入拖拽（不需要精准点中线）
+    limiterDragActive = true;
+    limiterDragStartThreshold = th;
 }
 
 void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseDrag (const juce::MouseEvent& e)

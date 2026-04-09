@@ -56,6 +56,16 @@ public:
     }
     void addPreGainDb(float deltaDb) noexcept { setPreGainDb(getPreGainDb() + deltaDb); }
 
+    // 额外限制器（前置增益之后）：阈值为线性幅度（0..1），严格将信号限制在 [-th, +th]
+    static constexpr float kLimiterThresholdMin = 0.0f;
+    static constexpr float kLimiterThresholdMax = 1.0f;
+
+    float getLimiterThreshold() const noexcept { return limiterThreshold.load(std::memory_order_relaxed); }
+    void setLimiterThreshold(float th) noexcept
+    {
+        limiterThreshold.store(juce::jlimit(kLimiterThresholdMin, kLimiterThresholdMax, th), std::memory_order_relaxed);
+    }
+
     bool bypassed = false;
 
 private:
@@ -70,6 +80,7 @@ private:
     int displayPresetIndex = 0;
 
     std::atomic<float> preGainDb { 4.0f };
+    std::atomic<float> limiterThreshold { 1.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LDSJvstAudioProcessor)
 };

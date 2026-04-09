@@ -18,10 +18,12 @@ private:
     static constexpr int baseEditorWidth  = 1000;
     static constexpr int baseEditorHeight = 750;
 
-    static constexpr int screenX = 107;
-    static constexpr int screenY = 120;
-    static constexpr int screenW = 643;
-    static constexpr int screenH = 529;
+    // 电视机屏幕显示区域（按基准尺寸布局，resized() 里会按比例缩放）
+    // 正确位置：左上角(130,135)，大小 606*466
+    static constexpr int screenX = 130;
+    static constexpr int screenY = 135;
+    static constexpr int screenW = 606;
+    static constexpr int screenH = 466;
 
     static constexpr float editorAspectRatio = (float) baseEditorWidth / (float) baseEditorHeight;
 
@@ -151,10 +153,17 @@ private:
 
     private:
         void timerCallback() override;
+        void mouseDown (const juce::MouseEvent&) override;
+        void mouseDrag (const juce::MouseEvent&) override;
+        void mouseUp   (const juce::MouseEvent&) override;
 
         LDSJvstAudioProcessorEditor& owner;
         LDSJvstAudioProcessor& processor;
         juce::Array<float> samples;
+
+        // 限制器线拖拽
+        bool limiterDragActive = false;
+        float limiterDragStartThreshold = 1.0f;
 
         // 屏幕离屏缓冲：用于做“按行 remap”的电视机行同步噪声扭曲
         juce::Image screenBase;

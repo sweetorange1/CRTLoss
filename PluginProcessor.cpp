@@ -99,7 +99,21 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         buffer.applyGain(g);
 
     // ============================================================
-    // 2) 硬削波 Hard Clip：保证输出不超过 0dBFS（[-1, +1]）
+    // 2) 额外限制器（前置增益之后）：严格限制在 [-th, +th]
+    // ============================================================
+    const float th = getLimiterThreshold();
+    if (th < 1.0f)
+    {
+        for (int ch = 0; ch < totalNumOutputChannels; ++ch)
+        {
+            auto* d = buffer.getWritePointer(ch);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+                d[i] = juce::jlimit(-th, th, d[i]);
+        }
+    }
+
+    // ============================================================
+    // 3) 硬削波 Hard Clip：保证输出不超过 0dBFS（[-1, +1]）
     // ============================================================
     for (int ch = 0; ch < totalNumOutputChannels; ++ch)
     {
@@ -135,6 +149,7 @@ void LDSJvstAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     state.setProperty("preset", displayPresetIndex, nullptr);
     state.setProperty("bypassed", bypassed ? 1 : 0, nullptr);
     state.setProperty("preGainDb", (double) getPreGainDb(), nullptr);
+    state.setProperty("limiterThreshold", (double) getLimiterThreshold(), nullptr);
 
     if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
@@ -161,6 +176,7 @@ void LDSJvstAudioProcessor::setStateInformation(const void* data, int sizeInByte
     bypassed = ((int) state.getProperty("bypassed", 0)) != 0;
 
     setPreGainDb((float) (double) state.getProperty("preGainDb", 4.0));
+    setLimiterThreshold((float) (double) state.getProperty("limiterThreshold", 1.0));
 }
 
 // 插件入口实现

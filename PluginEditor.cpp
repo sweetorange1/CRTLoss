@@ -26,6 +26,7 @@ LDSJvstAudioProcessorEditor::OscilloscopeComponent::OscilloscopeComponent(LDSJvs
                                                                          LDSJvstAudioProcessor& p)
     : owner(o), processor(p)
 {
+    setInterceptsMouseClicks(true, false);
     startTimerHz(30);
 }
 
@@ -33,6 +34,48 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::timerCallback()
 {
     processor.getOscilloscopeSnapshot(samples);
     repaint();
+}
+
+void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseDown (const juce::MouseEvent& e)
+{
+    const auto b = getLocalBounds().toFloat();
+
+    const float midY = b.getCentreY();
+    const float scaleY = b.getHeight() * 0.40f;
+
+    const float th = juce::jlimit(0.0f, 1.0f, processor.getLimiterThreshold());
+    const float yTop = midY - th * scaleY;
+    const float yBot = midY + th * scaleY;
+
+    // 点中灰线附近才进入拖拽
+    const float hit = 7.0f;
+    if (std::abs(e.position.y - yTop) <= hit || std::abs(e.position.y - yBot) <= hit)
+    {
+        limiterDragActive = true;
+        limiterDragStartThreshold = th;
+    }
+}
+
+void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! limiterDragActive)
+        return;
+
+    const auto b = getLocalBounds().toFloat();
+
+    const float midY = b.getCentreY();
+    const float scaleY = b.getHeight() * 0.40f;
+
+    // 鼠标离中心越远，阈值越大；以当前拖拽位置为准（两根线对称）
+    const float dist = std::abs(e.position.y - midY);
+    const float th = (scaleY > 1.0f) ? juce::jlimit(0.0f, 1.0f, dist / scaleY) : 1.0f;
+
+    processor.setLimiterThreshold(th);
+}
+
+void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseUp (const juce::MouseEvent&)
+{
+    limiterDragActive = false;
 }
 
 void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g)
@@ -1515,6 +1558,86 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 b.getX(), b.getY(), b.getWidth(), b.getHeight(),
                 0, 0, W, H,
                 false);
+
+    // ============================================================
+    // 5) 限制器阈值线（UI）：两根上下对称的线
+    //    目标：颜色/质感尽量贴合当前预设的“波形线”，但更弱化一些。
+    //    注意：画在 remap 之后，让线条保持稳定且易于交互。
+    // ============================================================
+    {
+        const float th = juce::jlimit(0.0f, 1.0f, processor.getLimiterThreshold());
+        const float midY = b.getCentreY();
+        const float scaleY = b.getHeight() * 0.40f;
+
+        const float yTop = midY - th * scaleY;
+        const float yBot = midY + th * scaleY;
+
+        const auto& presetParams = display_present::getPresetParams(preset);
+        const float accent = presetParams.bg.accentAlpha;
+
+        // 强度：比波形线明显更弱，但在不同预设亮度下保持可见
+        const float mainA   = juce::jlimit(0.10f, 0.42f, 0.14f + 1.10f * accent);
+        const float glowA   = juce::jlimit(0.04f, 0.20f, mainA * 0.38f);
+        const float shadowA = juce::jlimit(0.05f, 0.25f, mainA * 0.55f);
+
+        auto getWaveBaseColour = [&]() -> juce::Colour
+        {
+            switch (preset)
+            {
+                case 0:  return juce::Colour::fromRGB(0x39, 0xFF, 0x14); // 像素绿
+                case 1:  return juce::Colour::fromRGB(0x3A, 0xE6, 0xFF); // 冷色青
+                case 2:  return juce::Colour::fromRGB(0xFF, 0xB0, 0x30); // 琥珀
+                case 4:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5); // neonB
+                case 5:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5); // 磷光青
+                case 6:  return juce::Colour::fromRGB(0x7C, 0xFF, 0x6B); // 绿
+                case 7:  return juce::Colour::fromRGB(0xFF, 0x4D, 0xFF); // 品红
+                case 8:  return juce::Colour::fromRGB(0xFF, 0x66, 0x33); // 橙
+                case 9:  return juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); // 紫
+                case 10: return juce::Colours::white;
+                case 11: return juce::Colour::fromRGB(0x00, 0xFF, 0x66);
+                case 3:  // 彩虹：下面用渐变来画
+                default: return juce::Colours::white;
+            }
+        };
+
+        auto drawLineWithStyle = [&](float y, bool rainbow)
+        {
+            // 阴影（让线条更“贴”在屏幕上）
+            g.setColour(juce::Colours::black.withAlpha(shadowA));
+            g.drawLine(b.getX(), y + 1.0f, b.getRight(), y + 1.0f, 3.0f);
+
+            if (rainbow)
+            {
+                // 渐变主线：匹配 preset 3 的彩虹波形
+                juce::ColourGradient grad(juce::Colour::fromHSV(0.00f, 0.85f, 1.0f, mainA), b.getX(), y,
+                                          juce::Colour::fromHSV(1.00f, 0.85f, 1.0f, mainA), b.getRight(), y,
+                                          false);
+                g.setGradientFill(grad);
+                g.drawLine(b.getX(), y, b.getRight(), y, 2.0f);
+
+                juce::ColourGradient glow(juce::Colour::fromHSV(0.00f, 0.85f, 1.0f, glowA), b.getX(), y,
+                                          juce::Colour::fromHSV(1.00f, 0.85f, 1.0f, glowA), b.getRight(), y,
+                                          false);
+                g.setGradientFill(glow);
+                g.drawLine(b.getX(), y, b.getRight(), y, 6.5f);
+                return;
+            }
+
+            const auto base = getWaveBaseColour();
+
+            // 外辉光（弱）
+            g.setColour(base.withAlpha(glowA));
+            g.drawLine(b.getX(), y, b.getRight(), y, 6.0f);
+
+            // 主线（更细、更弱）
+            g.setColour(base.withAlpha(mainA));
+            g.drawLine(b.getX(), y, b.getRight(), y, 2.0f);
+        };
+
+        const bool rainbow = (preset == 3);
+        drawLineWithStyle(yTop, rainbow);
+        drawLineWithStyle(yBot, rainbow);
+    }
 }
 
 LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& p)

@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <vector>
+#include <memory>
 
 class LDSJvstAudioProcessor : public juce::AudioProcessor
 {
@@ -92,6 +93,36 @@ public:
         lossNotchQ.store(juce::jlimit(kLossNotchQMin, kLossNotchQMax, q), std::memory_order_relaxed);
     }
 
+    // 频带丢失算法模式：
+    // 0 = Legacy（当前旧算法，固定Q）
+    // 1 = Uniform Bandwidth（按频带边界推导Q，使每段带宽更精确统一）
+    static constexpr int kLossAlgorithmLegacy = 0;
+    static constexpr int kLossAlgorithmUniformBandwidth = 1;
+
+    int getLossAlgorithmMode() const noexcept { return lossAlgorithmMode.load(std::memory_order_relaxed); }
+    void setLossAlgorithmMode(int mode) noexcept
+    {
+        lossAlgorithmMode.store(juce::jlimit(kLossAlgorithmLegacy, kLossAlgorithmUniformBandwidth, mode),
+                                std::memory_order_relaxed);
+    }
+    void toggleLossAlgorithmMode() noexcept
+    {
+        setLossAlgorithmMode(getLossAlgorithmMode() == kLossAlgorithmLegacy
+                                 ? kLossAlgorithmUniformBandwidth
+                                 : kLossAlgorithmLegacy);
+    }
+
+    // 严格频段硬切模式：开启后使用频域硬掩码，尽可能将“丢失频段”切得更干净
+    bool isStrictBandCutEnabled() const noexcept { return strictBandCutEnabled.load(std::memory_order_relaxed); }
+    void setStrictBandCutEnabled(bool enabled) noexcept
+    {
+        strictBandCutEnabled.store(enabled, std::memory_order_relaxed);
+    }
+    void toggleStrictBandCutEnabled() noexcept
+    {
+        setStrictBandCutEnabled(! isStrictBandCutEnabled());
+    }
+
     std::atomic<bool> bypassed { false };
 
     bool isShuttingDownNow() const noexcept
@@ -143,6 +174,8 @@ private:
     std::atomic<float> randomRetriggerPerBeat { 4.0f };
     std::atomic<float> limiterThreshold { 1.0f };
     std::atomic<float> lossNotchQ { 6.0f };
+    std::atomic<int> lossAlgorithmMode { kLossAlgorithmLegacy };
+    std::atomic<bool> strictBandCutEnabled { false };
 
     std::array<LossPreset, 12> lossPresets {};
     std::array<uint8_t, kLossBandCount> lossMask {};
@@ -160,7 +193,23 @@ private:
 
     double currentSampleRateForLoss = 0.0;
     double currentLossNotchQForFilters = -1.0;
+    int currentLossAlgorithmModeForFilters = -1;
     double lossTimeSeconds = 0.0;
+
+    static constexpr int kStrictFftOrder = 11; // 2048
+    static constexpr int kStrictFftSize = 1 << kStrictFftOrder;
+    static constexpr int kStrictHopSize = kStrictFftSize / 2;
+
+    void resetStrictBandCutState();
+    void processStrictBandCut(juce::AudioBuffer<float>& buffer, int numChannels);
+
+    std::unique_ptr<juce::dsp::FFT> strictFft;
+    std::array<std::vector<float>, 2> strictInputFifo;
+    std::array<std::vector<float>, 2> strictOutputFifo;
+    std::array<std::vector<float>, 2> strictOutputOverlap;
+    std::array<std::vector<float>, 2> strictProcessTemp;
+    std::array<float, kStrictFftSize> strictWindow {};
+    bool strictBandCutLastEnabled = false;
 
     double nextLossRetriggerSeconds = 0.0;
     int lastLossPresetIndex = -1;

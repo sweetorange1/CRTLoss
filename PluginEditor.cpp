@@ -1415,11 +1415,35 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const juce::String label = "VOL";
             const juce::String value = juce::String(curDb >= 0.0f ? "+" : "") + juce::String(curDb, 0) + "dB";
 
+            const int algoMode = owner.processor.getLossAlgorithmMode();
+            const juce::String algoText = (algoMode == LDSJvstAudioProcessor::kLossAlgorithmUniformBandwidth)
+                                            ? "ST/SAP: UNIFORM BW"
+                                            : "ST/SAP: LEGACY Q";
+            const juce::String strictText = owner.processor.isStrictBandCutEnabled()
+                                              ? "TV: STRICT CUT ON"
+                                              : "TV: STRICT CUT OFF";
+
             gg.setColour(juce::Colours::black.withAlpha(0.65f * fade));
-            gg.drawText(label + " " + value, outer.translated(1.0f, 1.0f), juce::Justification::centred, true);
+            gg.drawText(label + " " + value, outer.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
 
             gg.setColour(accent.withAlpha(0.95f * fade));
-            gg.drawText(label + " " + value, outer, juce::Justification::centred, true);
+            gg.drawText(label + " " + value, outer, juce::Justification::centredTop, true);
+
+            auto algoRect = outer;
+            algoRect.removeFromTop(outer.getHeight() * 0.43f);
+            const float algoFontSize = juce::jlimit(8.0f, 12.0f, outer.getHeight() * 0.24f);
+            gg.setFont(juce::Font(algoFontSize, juce::Font::plain));
+
+            auto strictRect = algoRect;
+            strictRect.removeFromTop(algoRect.getHeight() * 0.5f);
+
+            gg.setColour(juce::Colours::black.withAlpha(0.65f * fade));
+            gg.drawText(algoText, algoRect.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
+            gg.drawText(strictText, strictRect.translated(1.0f, 1.0f), juce::Justification::centredBottom, true);
+
+            gg.setColour(accent.withAlpha(0.88f * fade));
+            gg.drawText(algoText, algoRect, juce::Justification::centredTop, true);
+            gg.drawText(strictText, strictRect, juce::Justification::centredBottom, true);
         }
 
         // 边框线（离屏也画一遍；最终 warp 后还能保持统一）
@@ -1869,6 +1893,33 @@ void LDSJvstAudioProcessorEditor::nudgePreGainDbFromUI (float deltaDb)
     processor.addPreGainDb(deltaDb);
 
     // 触发一次 OSD 显示
+    volumeOsdActive = true;
+    volumeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
+    oscilloscope.repaint();
+}
+
+void LDSJvstAudioProcessorEditor::toggleLossAlgorithmFromUI()
+{
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
+    processor.toggleLossAlgorithmMode();
+
+    // 复用 OSD 生命周期，让用户切换后立即看到反馈信息
+    volumeOsdActive = true;
+    volumeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
+    oscilloscope.repaint();
+}
+
+void LDSJvstAudioProcessorEditor::toggleStrictBandCutFromUI()
+{
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
+    processor.toggleStrictBandCutEnabled();
+
     volumeOsdActive = true;
     volumeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
@@ -2380,6 +2431,16 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
                 const int cur = owner.getSelectedPresetIndex();
                 const int prev = (cur + presetCount - 1) % presetCount;
                 owner.setSelectedPresetIndex(prev);
+            }
+            // ST/SAP：切换频带丢失算法（Legacy <-> Uniform Bandwidth）
+            else if (std::strcmp (b.name, "ST/SAP") == 0)
+            {
+                owner.toggleLossAlgorithmFromUI();
+            }
+            // TV：切换严格频段硬切（开启后按频段边界做频域硬掩码）
+            else if (std::strcmp (b.name, "TV") == 0)
+            {
+                owner.toggleStrictBandCutFromUI();
             }
         }
 

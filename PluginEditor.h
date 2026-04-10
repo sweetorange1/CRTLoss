@@ -320,6 +320,8 @@ private:
 
     // 前置增益（遥控器 VOL+/VOL-）+ 电视屏幕 OSD 控制条
     void nudgePreGainDbFromUI (float deltaDb);
+    void toggleLossAlgorithmFromUI(); // 遥控器 ST/SAP：在两种频带丢失算法间切换
+    void toggleStrictBandCutFromUI(); // 遥控器 TV：切换“严格频段硬切”
     float getVolumeOsdT() noexcept; // 0..1（时间进度），0 表示不显示
 
     // 临时测试控件：输入 Notch Q。

@@ -21,6 +21,21 @@ LDSJvstAudioProcessor::LDSJvstAudioProcessor()
     lossBandWet.fill(1.0f);
     activeLossBandCount = 0;
     lossRandom.setSeedRandomly();
+
+    strictFft = std::make_unique<juce::dsp::FFT>(kStrictFftOrder);
+
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        strictInputFifo[(size_t) ch].assign((size_t) kStrictFftSize, 0.0f);
+        strictOutputFifo[(size_t) ch].assign((size_t) kStrictFftSize, 0.0f);
+        strictOutputOverlap[(size_t) ch].assign((size_t) kStrictFftSize, 0.0f);
+        strictProcessTemp[(size_t) ch].assign((size_t) (2 * kStrictFftSize), 0.0f);
+    }
+
+    for (int n = 0; n < kStrictFftSize; ++n)
+        strictWindow[(size_t) n] = 0.5f - 0.5f * std::cos(2.0f * juce::MathConstants<float>::pi * (float) n / (float) (kStrictFftSize - 1));
+
+    resetStrictBandCutState();
 }
 
 LDSJvstAudioProcessor::~LDSJvstAudioProcessor()
@@ -206,15 +221,32 @@ void LDSJvstAudioProcessor::ensureLossFilters(double sampleRate)
         return;
 
     const float desiredQ = juce::jlimit(kLossNotchQMin, kLossNotchQMax, getLossNotchQ());
+    const int algorithmMode = juce::jlimit(kLossAlgorithmLegacy,
+                                           kLossAlgorithmUniformBandwidth,
+                                           getLossAlgorithmMode());
 
-    if (sampleRate == currentSampleRateForLoss && std::abs((float) currentLossNotchQForFilters - desiredQ) < 0.0001f)
+    const bool sampleRateUnchanged = (sampleRate == currentSampleRateForLoss);
+    const bool qUnchanged = (std::abs((float) currentLossNotchQForFilters - desiredQ) < 0.0001f);
+    const bool modeUnchanged = (algorithmMode == currentLossAlgorithmModeForFilters);
+
+    if (sampleRateUnchanged && qUnchanged && modeUnchanged)
         return;
 
     currentSampleRateForLoss = sampleRate;
     currentLossNotchQForFilters = desiredQ;
+    currentLossAlgorithmModeForFilters = algorithmMode;
 
     const double tau = juce::jmax(0.0001, (double) kLossMaskSmoothingTimeSeconds);
     lossMaskSmoothCoeff = (float) std::exp(-1.0 / (sampleRate * tau));
+
+    // 频段定义：沿用现有 20Hz~20kHz 的对数划分（100 段）
+    // Uniform Bandwidth 模式下，不再使用全段统一Q；
+    // 而是按每个频段上下边界推导“该频段对应的Q”，使每段陷波覆盖宽度更贴近该段带宽。
+    constexpr float lo = 20.0f;
+    constexpr float hi = 20000.0f;
+    const float ratio = std::pow(hi / lo, 1.0f / (float) (kLossBandCount - 1));
+
+    const float nyquistSafe = (float) (sampleRate * 0.45);
 
     for (int i = 0; i < kLossBandCount; ++i)
 
@@ -222,13 +254,26 @@ void LDSJvstAudioProcessor::ensureLossFilters(double sampleRate)
         auto& fl = lossBandNotchL[(size_t) i];
         auto& fr = lossBandNotchR[(size_t) i];
 
-        const float nyquistSafe = (float) (sampleRate * 0.45);
-        const float f = juce::jlimit(20.0f, juce::jmax(20.0f, nyquistSafe), getLossBandCenterHz(i));
+        const float center = getLossBandCenterHz(i);
+        const float f = juce::jlimit(20.0f, juce::jmax(20.0f, nyquistSafe), center);
+
+        float qForBand = desiredQ;
+
+        if (algorithmMode == kLossAlgorithmUniformBandwidth)
+        {
+            const float fLo = center / std::sqrt(ratio);
+            const float fHi = center * std::sqrt(ratio);
+            const float bandWidthHz = juce::jmax(1.0f, fHi - fLo);
+            const float derivedQ = juce::jmax(0.01f, center / bandWidthHz);
+
+            // 用现有 Notch Q 范围约束，保证参数行为与稳定性一致
+            qForBand = juce::jlimit(kLossNotchQMin, kLossNotchQMax, derivedQ);
+        }
 
         fl.reset();
         fr.reset();
-        fl.setCoefficients(juce::IIRCoefficients::makeNotchFilter(sampleRate, f, desiredQ));
-        fr.setCoefficients(juce::IIRCoefficients::makeNotchFilter(sampleRate, f, desiredQ));
+        fl.setCoefficients(juce::IIRCoefficients::makeNotchFilter(sampleRate, f, qForBand));
+        fr.setCoefficients(juce::IIRCoefficients::makeNotchFilter(sampleRate, f, qForBand));
 
     }
 }
@@ -359,6 +404,8 @@ void LDSJvstAudioProcessor::prepareToPlay(double sampleRate, int)
     oscilloscopeWritePos = 0;
 
     ensureLossFilters(sampleRate);
+    resetStrictBandCutState();
+    strictBandCutLastEnabled = isStrictBandCutEnabled();
 
     lossTimeSeconds = 0.0;
     nextLossRetriggerSeconds = 0.0;
@@ -388,6 +435,7 @@ void LDSJvstAudioProcessor::releaseResources()
 
     lossMask.fill(1);
     lossBandWet.fill(0.0f);
+    resetStrictBandCutState();
 
     const juce::SpinLock::ScopedTryLockType maskLock(lossMaskSnapshotLock);
     if (maskLock.isLocked())
@@ -447,6 +495,126 @@ void LDSJvstAudioProcessor::getLossMaskSnapshot(juce::Array<uint8_t>& dest)
 
     for (int i = 0; i < kLossBandCount; ++i)
         dest.set(i, lossMaskSnapshot[(size_t) i]);
+}
+
+void LDSJvstAudioProcessor::resetStrictBandCutState()
+{
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        if (! strictInputFifo[(size_t) ch].empty())
+            std::fill(strictInputFifo[(size_t) ch].begin(), strictInputFifo[(size_t) ch].end(), 0.0f);
+
+        if (! strictOutputFifo[(size_t) ch].empty())
+            std::fill(strictOutputFifo[(size_t) ch].begin(), strictOutputFifo[(size_t) ch].end(), 0.0f);
+
+        if (! strictOutputOverlap[(size_t) ch].empty())
+            std::fill(strictOutputOverlap[(size_t) ch].begin(), strictOutputOverlap[(size_t) ch].end(), 0.0f);
+    }
+}
+
+void LDSJvstAudioProcessor::processStrictBandCut(juce::AudioBuffer<float>& buffer, int numChannels)
+{
+    if (strictFft == nullptr)
+        return;
+
+    const int channels = juce::jlimit(0, 2, numChannels);
+    if (channels <= 0)
+        return;
+
+    const int numSamples = buffer.getNumSamples();
+    if (numSamples <= 0)
+        return;
+
+    constexpr float lo = 20.0f;
+    constexpr float hi = 20000.0f;
+    const float ratio = std::pow(hi / lo, 1.0f / (float) (kLossBandCount - 1));
+
+    std::array<uint8_t, kLossBandCount> localMask {};
+    for (int b = 0; b < kLossBandCount; ++b)
+        localMask[(size_t) b] = lossMask[(size_t) b];
+
+    const double sr = juce::jmax(1.0, getSampleRate());
+    const float nyquist = (float) (sr * 0.5);
+    const float maxBandHz = juce::jmax(lo, nyquist * 0.999f);
+
+    std::vector<float> binGain((size_t) (kStrictFftSize / 2 + 1), 1.0f);
+
+    for (int b = 0; b < kLossBandCount; ++b)
+    {
+        if (localMask[(size_t) b] != 0)
+            continue;
+
+        const float center = getLossBandCenterHz(b);
+        const float fLo = juce::jlimit(lo, maxBandHz, center / std::sqrt(ratio));
+        const float fHi = juce::jlimit(lo, maxBandHz, center * std::sqrt(ratio));
+
+        const int k0 = juce::jlimit(0, kStrictFftSize / 2,
+                                    (int) std::floor((double) fLo * (double) kStrictFftSize / sr));
+        const int k1 = juce::jlimit(0, kStrictFftSize / 2,
+                                    (int) std::ceil((double) fHi * (double) kStrictFftSize / sr));
+
+        for (int k = k0; k <= k1; ++k)
+            binGain[(size_t) k] = 0.0f;
+    }
+
+    for (int ch = 0; ch < channels; ++ch)
+    {
+        auto* x = buffer.getWritePointer(ch);
+        auto& inFifo = strictInputFifo[(size_t) ch];
+        auto& outFifo = strictOutputFifo[(size_t) ch];
+        auto& overlap = strictOutputOverlap[(size_t) ch];
+        auto& fftData = strictProcessTemp[(size_t) ch];
+
+        if ((int) inFifo.size() != kStrictFftSize ||
+            (int) outFifo.size() != kStrictFftSize ||
+            (int) overlap.size() != kStrictFftSize ||
+            (int) fftData.size() != 2 * kStrictFftSize)
+            continue;
+
+        int writePos = 0;
+        while (writePos < numSamples)
+        {
+            const int chunk = juce::jmin(kStrictHopSize, numSamples - writePos);
+
+            std::move(inFifo.begin() + chunk, inFifo.end(), inFifo.begin());
+            std::copy(x + writePos, x + writePos + chunk, inFifo.end() - chunk);
+
+            std::move(outFifo.begin() + chunk, outFifo.end(), outFifo.begin());
+            std::fill(outFifo.end() - chunk, outFifo.end(), 0.0f);
+
+            std::fill(fftData.begin(), fftData.end(), 0.0f);
+            for (int n = 0; n < kStrictFftSize; ++n)
+                fftData[(size_t) n] = inFifo[(size_t) n] * strictWindow[(size_t) n];
+
+            strictFft->performRealOnlyForwardTransform(fftData.data());
+
+            fftData[0] *= binGain[0];
+            fftData[1] *= binGain[(size_t) (kStrictFftSize / 2)];
+
+            for (int k = 1; k < kStrictFftSize / 2; ++k)
+            {
+                const float g = binGain[(size_t) k];
+                fftData[(size_t) (2 * k)] *= g;
+                fftData[(size_t) (2 * k + 1)] *= g;
+            }
+
+            strictFft->performRealOnlyInverseTransform(fftData.data());
+
+            const float norm = 2.0f / (3.0f * (float) kStrictFftSize);
+            for (int n = 0; n < kStrictFftSize; ++n)
+            {
+                const float yw = fftData[(size_t) n] * strictWindow[(size_t) n] * norm;
+                outFifo[(size_t) n] += yw + overlap[(size_t) n];
+            }
+
+            std::fill(overlap.begin(), overlap.end(), 0.0f);
+            for (int n = 0; n < (kStrictFftSize - kStrictHopSize); ++n)
+                overlap[(size_t) n] = outFifo[(size_t) (n + kStrictHopSize)];
+
+            std::copy(outFifo.begin(), outFifo.begin() + chunk, x + writePos);
+            writePos += chunk;
+        }
+    }
 }
 
 void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -514,42 +682,56 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     if (lossTimeSeconds >= nextLossRetriggerSeconds)
         retriggerLossMask(lossTimeSeconds);
 
-    auto* left  = (totalNumOutputChannels > 0) ? buffer.getWritePointer(0) : nullptr;
-    auto* right = (totalNumOutputChannels > 1) ? buffer.getWritePointer(1) : nullptr;
-
-    for (int i = 0; i < buffer.getNumSamples(); ++i)
+    const bool strictEnabled = isStrictBandCutEnabled();
+    if (strictEnabled != strictBandCutLastEnabled)
     {
-        // 先统一更新本 sample 的频段 wet（与声道无关），再分别处理左右声道
-        for (int b = 0; b < kLossBandCount; ++b)
-        {
-            const float targetWet = (lossMask[(size_t) b] == 0) ? 1.0f : 0.0f;
-            const float prevWet = lossBandWet[(size_t) b];
-            const float wet = targetWet + (prevWet - targetWet) * lossMaskSmoothCoeff;
-            lossBandWet[(size_t) b] = wet;
-        }
+        resetStrictBandCutState();
+        strictBandCutLastEnabled = strictEnabled;
+    }
 
-        if (left != nullptr)
+    if (strictEnabled)
+    {
+        processStrictBandCut(buffer, totalNumOutputChannels);
+    }
+    else
+    {
+        auto* left  = (totalNumOutputChannels > 0) ? buffer.getWritePointer(0) : nullptr;
+        auto* right = (totalNumOutputChannels > 1) ? buffer.getWritePointer(1) : nullptr;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
         {
-            float x = left[i];
+            // 先统一更新本 sample 的频段 wet（与声道无关），再分别处理左右声道
             for (int b = 0; b < kLossBandCount; ++b)
             {
-                const float wet = lossBandWet[(size_t) b];
-                const float y = lossBandNotchL[(size_t) b].processSingleSampleRaw(x);
-                x = x + wet * (y - x);
+                const float targetWet = (lossMask[(size_t) b] == 0) ? 1.0f : 0.0f;
+                const float prevWet = lossBandWet[(size_t) b];
+                const float wet = targetWet + (prevWet - targetWet) * lossMaskSmoothCoeff;
+                lossBandWet[(size_t) b] = wet;
             }
-            left[i] = x;
-        }
 
-        if (right != nullptr)
-        {
-            float x = right[i];
-            for (int b = 0; b < kLossBandCount; ++b)
+            if (left != nullptr)
             {
-                const float wet = lossBandWet[(size_t) b];
-                const float y = lossBandNotchR[(size_t) b].processSingleSampleRaw(x);
-                x = x + wet * (y - x);
+                float x = left[i];
+                for (int b = 0; b < kLossBandCount; ++b)
+                {
+                    const float wet = lossBandWet[(size_t) b];
+                    const float y = lossBandNotchL[(size_t) b].processSingleSampleRaw(x);
+                    x = x + wet * (y - x);
+                }
+                left[i] = x;
             }
-            right[i] = x;
+
+            if (right != nullptr)
+            {
+                float x = right[i];
+                for (int b = 0; b < kLossBandCount; ++b)
+                {
+                    const float wet = lossBandWet[(size_t) b];
+                    const float y = lossBandNotchR[(size_t) b].processSingleSampleRaw(x);
+                    x = x + wet * (y - x);
+                }
+                right[i] = x;
+            }
         }
     }
 
@@ -597,6 +779,8 @@ void LDSJvstAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     state.setProperty("randomRetriggerPerBeat", (double) getRandomRetriggerPerBeat(), nullptr);
     state.setProperty("limiterThreshold", (double) getLimiterThreshold(), nullptr);
     state.setProperty("lossNotchQ", (double) getLossNotchQ(), nullptr);
+    state.setProperty("lossAlgorithmMode", getLossAlgorithmMode(), nullptr);
+    state.setProperty("strictBandCutEnabled", isStrictBandCutEnabled() ? 1 : 0, nullptr);
 
     if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
@@ -626,6 +810,8 @@ void LDSJvstAudioProcessor::setStateInformation(const void* data, int sizeInByte
     setRandomRetriggerPerBeat((float) (double) state.getProperty("randomRetriggerPerBeat", 4.0));
     setLimiterThreshold((float) (double) state.getProperty("limiterThreshold", 1.0));
     setLossNotchQ((float) (double) state.getProperty("lossNotchQ", 11.0));
+    setLossAlgorithmMode((int) state.getProperty("lossAlgorithmMode", kLossAlgorithmLegacy));
+    setStrictBandCutEnabled(((int) state.getProperty("strictBandCutEnabled", 0)) != 0);
 
 }
 

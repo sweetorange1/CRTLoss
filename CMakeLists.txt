@@ -52,4 +52,4 @@ target_sources(LDSJvst PRIVATE
   PluginEditor.h
 )
 
-target_link_libraries(LDSJvst PRIVATE grid::grid_plugin juce::juce_audio_utils LDSJvst_BinaryData)
+target_link_libraries(LDSJvst PRIVATE grid::grid_plugin juce::juce_audio_utils juce::juce_dsp LDSJvst_BinaryData)

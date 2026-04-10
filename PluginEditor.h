@@ -53,6 +53,16 @@ private:
     static constexpr int remoteBypassW = 68;
     static constexpr int remoteBypassH = 10;
 
+    // 临时 Q 输入框（底部区域，按基准尺寸）
+    static constexpr int tempQLabelX = 145;
+    static constexpr int tempQLabelY = 708;
+    static constexpr int tempQLabelW = 130;
+    static constexpr int tempQLabelH = 24;
+    static constexpr int tempQInputX = 280;
+    static constexpr int tempQInputY = 706;
+    static constexpr int tempQInputW = 120;
+    static constexpr int tempQInputH = 28;
+
     juce::ComponentBoundsConstrainer resizeConstrainer;
     juce::Image tvImage;
     juce::Image bypassImage;
@@ -74,6 +84,15 @@ private:
         void paint (juce::Graphics& g) override
         {
             auto b = getLocalBounds().toFloat().reduced(1.0f);
+
+            if (owner.processor.bypassed.load(std::memory_order_acquire))
+            {
+                g.setColour(juce::Colours::black.withAlpha(0.75f));
+                g.fillEllipse(b);
+                g.setColour(juce::Colours::black.withAlpha(0.35f));
+                g.drawEllipse(b, 1.0f);
+                return;
+            }
 
             const bool isOn = (owner.getSelectedPresetIndex() == index);
 
@@ -149,6 +168,8 @@ private:
     public:
         OscilloscopeComponent(LDSJvstAudioProcessorEditor& ownerEditor, LDSJvstAudioProcessor&);
 
+        void shutdownForEditorTeardown() { stopTimer(); }
+
         void paint(juce::Graphics&) override;
 
     private:
@@ -160,6 +181,9 @@ private:
         LDSJvstAudioProcessorEditor& owner;
         LDSJvstAudioProcessor& processor;
         juce::Array<float> samples;
+        juce::Array<uint8_t> lossMaskSnapshotUI;
+
+        static constexpr int kBandGridCount = LDSJvstAudioProcessor::kLossBandCountForUI;
 
         // 限制器线拖拽
         bool limiterDragActive = false;
@@ -216,7 +240,15 @@ private:
 
         ~RemoteControlOverlay() override = default;
 
+        void shutdownForEditorTeardown()
+        {
+            stopTimer();
+            volumeRepeatActive = false;
+            volumeRepeatDir = 0;
+        }
+
         bool hitTest (int x, int y) override
+
         {
             // 遥控器“拿出来/动画中”时：作为一个 modal 覆盖层，阻止底下的按钮/指示灯被误触。
             if (owner.remotePulledOut || owner.getRemotePullAmount() > 0.001f)
@@ -290,9 +322,20 @@ private:
     void nudgePreGainDbFromUI (float deltaDb);
     float getVolumeOsdT() noexcept; // 0..1（时间进度），0 表示不显示
 
+    // 临时测试控件：输入 Notch Q。
+    // 若要直接屏蔽该控件，把这里改成 false 即可。
+    static constexpr bool kEnableTempQInput = false;
+    void refreshTempNotchQInputText();
+    void applyTempNotchQFromInput();
+
+    juce::Label tempNotchQLabel;
+    juce::TextEditor tempNotchQInput;
+
     bool volumeOsdActive = false;
     double volumeOsdStartSeconds = 0.0;
     static constexpr double volumeOsdDurationSeconds = 3.0;
+
+    bool editorShuttingDown = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LDSJvstAudioProcessorEditor)
 };

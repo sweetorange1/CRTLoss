@@ -17,9 +17,9 @@ add_subdirectory(grid_plugin)
 
 juce_add_plugin(
         LDSJvst
-        PRODUCT_NAME "LDSJvst"
-        VERSION 0.1.0
-        COMPANY_NAME "YourCompany"
+        PRODUCT_NAME "CRTloss"
+        VERSION 1.0.0
+        COMPANY_NAME "iisaac_m1"
         PLUGIN_MANUFACTURER_CODE Ldsj
         PLUGIN_CODE Ldsj
         FORMATS VST3 Standalone

@@ -8,7 +8,8 @@
 void LDSJvstAudioProcessorEditor::BypassHitArea::paint (juce::Graphics& g)
 {
     // 触发区本身保持透明；如果 bypass 开启，则用图片覆盖该区域
-    if (owner.processor.bypassed && owner.bypassImage.isValid())
+    if (owner.processor.bypassed.load(std::memory_order_acquire) && owner.bypassImage.isValid())
+
     {
         g.drawImageWithin(owner.bypassImage,
                           0, 0, getWidth(), getHeight(),
@@ -32,7 +33,14 @@ LDSJvstAudioProcessorEditor::OscilloscopeComponent::OscilloscopeComponent(LDSJvs
 
 void LDSJvstAudioProcessorEditor::OscilloscopeComponent::timerCallback()
 {
+    if (owner.editorShuttingDown || processor.isShuttingDownNow())
+    {
+        stopTimer();
+        return;
+    }
+
     processor.getOscilloscopeSnapshot(samples);
+    processor.getLossMaskSnapshot(lossMaskSnapshotUI);
     repaint();
 }
 
@@ -90,11 +98,17 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
     const juce::Graphics::ScopedSaveState clipState(g);
     g.reduceClipRegion(clip);
 
-    // bypass：不显示中间波形（但仍允许动画覆盖层在下面继续绘制）
+    // bypass：电视关机语义，稳态时全黑；过渡时保留开关机动画
     const bool bypassActive = owner.isBypassedOrTransitioningToBypass();
 
-    // 即使 bypass 时也允许画“关机动画”，所以这里不直接 return。
-    if (samples.isEmpty() && ! bypassActive)
+    if (bypassActive && ! owner.bypassTransitionActive)
+    {
+        g.setColour(juce::Colours::black);
+        g.fillRect(b);
+        return;
+    }
+
+    if (samples.isEmpty() && ! owner.bypassTransitionActive)
         return;
 
     // ============================================================
@@ -604,7 +618,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         // 预设 0：像素电视雪花（这块仍然用原来的逐像素生成方式）
         if (preset == 0 && ! bypassActive)
         {
-            const int downsample = 5;
+            const int downsample = 2;
             const int lw = juce::jmax(2, (int) (sb.getWidth()  / (float) downsample));
             const int lh = juce::jmax(2, (int) (sb.getHeight() / (float) downsample));
 
@@ -621,14 +635,14 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     for (int x = 0; x < lw; ++x)
                     {
                         juce::uint8 v;
-                        if (rng.nextFloat() < 0.12f)
-                            v = (juce::uint8) rng.nextInt(55);
+                        if (rng.nextFloat() < 0.09f)
+                            v = (juce::uint8) rng.nextInt(48);
                         else
-                            v = (juce::uint8) (180 + rng.nextInt(76));
+                            v = (juce::uint8) (172 + rng.nextInt(84));
 
-                        v = (juce::uint8) ((v / 16) * 16);
+                        v = (juce::uint8) ((v / 8) * 8);
                         if (scanline)
-                            v = (juce::uint8) juce::jlimit(0, 255, (int) (v * 0.92f));
+                            v = (juce::uint8) juce::jlimit(0, 255, (int) (v * 0.94f));
 
                         line[x].setARGB((juce::uint8) 255, v, v, v);
                     }
@@ -1186,25 +1200,19 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 case 9:
                 {
                     // 降噪：降低 CRT tile 覆盖强度，避免影响波形清晰度
+                    // 注意：避免函数内 static 图像，规避部分宿主卸载阶段的静态析构卡死风险。
                     const int step = (int) juce::jlimit(2.0f, 6.0f, 6.0f - 3.0f * amount);
-                    auto getCrtTile = [&](int s) -> const juce::Image&
+                    juce::Image tile (juce::Image::ARGB, step * 3, step, true);
                     {
-                        static juce::Image img;
-                        if (! img.isValid() || img.getWidth() != s * 3)
+                        juce::Image::BitmapData bd(tile, juce::Image::BitmapData::readWrite);
+                        for (int y = 0; y < step; ++y)
                         {
-                            img = juce::Image(juce::Image::ARGB, s * 3, s, true);
-                            juce::Image::BitmapData bd(img, juce::Image::BitmapData::readWrite);
-                            for (int y = 0; y < s; ++y)
-                            {
-                                bd.setPixelColour(0, y, juce::Colours::red);
-                                bd.setPixelColour(1, y, juce::Colours::green);
-                                bd.setPixelColour(2, y, juce::Colours::blue);
-                            }
+                            bd.setPixelColour(0, y, juce::Colours::red);
+                            bd.setPixelColour(1, y, juce::Colours::green);
+                            bd.setPixelColour(2, y, juce::Colours::blue);
                         }
-                        return img;
-                    };
+                    }
 
-                    const auto& tile = getCrtTile(step);
                     const int ox = (int) (sb.getX() + std::fmod(seconds * (18.0f + 35.0f * amount), (float) (step * 3)));
                     const int oy = (int) (sb.getY() + std::fmod(seconds * (6.0f + 10.0f * amount), (float) step));
                     gg.setTiledImageFill(tile, ox, oy, 0.008f * amount);
@@ -1245,7 +1253,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             }
         };
 
-        if (! owner.processor.bypassed)
+        if (! owner.processor.bypassed.load(std::memory_order_acquire))
             applyGlitch(waveform, ! bypassActive);
 
         // --- 预设切换动画 ---
@@ -1637,6 +1645,83 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         drawLineWithStyle(yTop, rainbow);
         drawLineWithStyle(yBot, rainbow);
     }
+
+    // ============================================================
+    // 6) 屏幕下方频段通过指示（100格）：左低频 -> 右高频
+    //    亮 = 当前频段允许通过（mask=1），灭 = 当前频段被滤掉（mask=0）
+    // ============================================================
+    {
+        const int bands = kBandGridCount;
+        if (bands > 0)
+        {
+            if (lossMaskSnapshotUI.size() != bands)
+            {
+                lossMaskSnapshotUI.resize(bands);
+                for (int i = 0; i < bands; ++i)
+                    lossMaskSnapshotUI.set(i, (uint8_t) 1);
+            }
+
+            const float marginX = juce::jmax(8.0f, b.getWidth() * 0.03f);
+            const float gridAreaW = juce::jmax(50.0f, b.getWidth() - marginX * 2.0f);
+
+            const float gap = juce::jmax(0.0f, juce::jmin(1.0f, b.getWidth() * 0.0012f));
+            const float cellW = juce::jmax(1.0f, (gridAreaW - gap * (float) (bands - 1)) / (float) bands);
+            const float cellH = juce::jmax(3.0f, b.getHeight() * 0.020f);
+
+            const float x0 = b.getX() + (b.getWidth() - (cellW * (float) bands + gap * (float) (bands - 1))) * 0.5f;
+            const float y0 = b.getBottom() - cellH - juce::jmax(2.0f, b.getHeight() * 0.018f);
+
+            const auto& presetParams = display_present::getPresetParams(preset);
+            const float accent = presetParams.bg.accentAlpha;
+
+            auto getWaveBaseColour = [&]() -> juce::Colour
+            {
+                switch (preset)
+                {
+                    case 0:  return juce::Colour::fromRGB(0x39, 0xFF, 0x14);
+                    case 1:  return juce::Colour::fromRGB(0x3A, 0xE6, 0xFF);
+                    case 2:  return juce::Colour::fromRGB(0xFF, 0xB0, 0x30);
+                    case 4:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
+                    case 5:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
+                    case 6:  return juce::Colour::fromRGB(0x7C, 0xFF, 0x6B);
+                    case 7:  return juce::Colour::fromRGB(0xFF, 0x4D, 0xFF);
+                    case 8:  return juce::Colour::fromRGB(0xFF, 0x66, 0x33);
+                    case 9:  return juce::Colour::fromRGB(0xB7, 0x4D, 0xFF);
+                    case 10: return juce::Colours::white;
+                    case 11: return juce::Colour::fromRGB(0x00, 0xFF, 0x66);
+                    case 3:
+                    default: return juce::Colours::white;
+                }
+            };
+
+            const auto base = getWaveBaseColour();
+            const auto litColour = base.withAlpha(juce::jlimit(0.65f, 0.98f, 0.68f + 1.2f * accent));
+            const auto dimColour = juce::Colours::black.withAlpha(juce::jlimit(0.52f, 0.84f, 0.72f - 0.4f * accent));
+            const auto borderColour = base.withAlpha(juce::jlimit(0.10f, 0.38f, 0.12f + 0.8f * accent));
+
+            for (int i = 0; i < bands; ++i)
+            {
+                const float x = x0 + (float) i * (cellW + gap);
+                const auto r = juce::Rectangle<float>(x, y0, cellW, cellH);
+                const bool pass = lossMaskSnapshotUI[i] != 0;
+
+                if (preset == 3 && pass)
+                {
+                    const float t = (float) i / (float) juce::jmax(1, bands - 1);
+                    g.setColour(juce::Colour::fromHSV(t, 0.88f, 1.0f, litColour.getFloatAlpha()));
+                }
+                else
+                {
+                    g.setColour(pass ? litColour : dimColour);
+                }
+                g.fillRect(r);
+
+                g.setColour(borderColour);
+                g.drawRect(r, 0.35f);
+            }
+
+        }
+    }
 }
 
 LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& p)
@@ -1659,7 +1744,23 @@ LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& 
     addAndMakeVisible(tvOverlay);
     addAndMakeVisible(remoteOverlay);
 
+    if constexpr (kEnableTempQInput)
+    {
+        tempNotchQLabel.setText("Notch Q (test)", juce::dontSendNotification);
+        tempNotchQLabel.setJustificationType(juce::Justification::centredLeft);
+        tempNotchQLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
+
+        tempNotchQInput.setInputRestrictions(0, "0123456789.");
+        tempNotchQInput.onReturnKey = [this] { applyTempNotchQFromInput(); };
+        tempNotchQInput.onFocusLost = [this] { applyTempNotchQFromInput(); };
+
+        addAndMakeVisible(tempNotchQLabel);
+        addAndMakeVisible(tempNotchQInput);
+        refreshTempNotchQInputText();
+    }
+
     presetLights.ensureStorageAllocated(presetCount);
+
     for (int i = 0; i < presetCount; ++i)
     {
         auto* light = presetLights.add(new IndicatorLight(*this, i));
@@ -1681,7 +1782,19 @@ LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& 
             light->repaint();
 }
 
-LDSJvstAudioProcessorEditor::~LDSJvstAudioProcessorEditor() {}
+LDSJvstAudioProcessorEditor::~LDSJvstAudioProcessorEditor()
+{
+    editorShuttingDown = true;
+
+    oscilloscope.shutdownForEditorTeardown();
+    remoteOverlay.shutdownForEditorTeardown();
+
+    if constexpr (kEnableTempQInput)
+    {
+        tempNotchQInput.onReturnKey = nullptr;
+        tempNotchQInput.onFocusLost = nullptr;
+    }
+}
 
 void LDSJvstAudioProcessorEditor::paint(juce::Graphics& g)
 {
@@ -1690,23 +1803,29 @@ void LDSJvstAudioProcessorEditor::paint(juce::Graphics& g)
 
 void LDSJvstAudioProcessorEditor::toggleBypassFromUI()
 {
-    const bool next = ! processor.bypassed;
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
+    const bool next = ! processor.bypassed.load(std::memory_order_acquire);
 
     bypassTransitionActive = true;
     bypassTransitionToOn = next;
     bypassTransitionStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
-    processor.bypassed = next;
+    processor.bypassed.store(next, std::memory_order_release);
 
     // 刷新触发区图片与屏幕
     bypassHitArea.repaint();
     oscilloscope.repaint();
+    for (auto* light : presetLights)
+        if (light != nullptr)
+            light->repaint();
 }
 
 bool LDSJvstAudioProcessorEditor::isBypassedOrTransitioningToBypass() const noexcept
 {
     // 目标是 bypass ON 时，波形不显示；动画开始时也先隐藏波形避免“残影”
-    return processor.bypassed || (bypassTransitionActive && bypassTransitionToOn);
+    return processor.bypassed.load(std::memory_order_acquire) || (bypassTransitionActive && bypassTransitionToOn);
 }
 
 float LDSJvstAudioProcessorEditor::getBypassTransitionT() noexcept
@@ -1744,6 +1863,9 @@ float LDSJvstAudioProcessorEditor::getPresetTransitionT() noexcept
 
 void LDSJvstAudioProcessorEditor::nudgePreGainDbFromUI (float deltaDb)
 {
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
     processor.addPreGainDb(deltaDb);
 
     // 触发一次 OSD 显示
@@ -1771,9 +1893,40 @@ float LDSJvstAudioProcessorEditor::getVolumeOsdT() noexcept
     return juce::jlimit(0.0f, 1.0f, t);
 }
 
-void LDSJvstAudioProcessorEditor::setSelectedPresetIndex (int newIndex)
+void LDSJvstAudioProcessorEditor::refreshTempNotchQInputText()
 {
+    if constexpr (! kEnableTempQInput)
+        return;
+
+    const float q = processor.getLossNotchQ();
+    tempNotchQInput.setText(juce::String(q, 3), juce::dontSendNotification);
+}
+
+void LDSJvstAudioProcessorEditor::applyTempNotchQFromInput()
+{
+    if constexpr (! kEnableTempQInput)
+        return;
+
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
+    const float parsed = tempNotchQInput.getText().getFloatValue();
+    const float clamped = juce::jlimit(LDSJvstAudioProcessor::kLossNotchQMin,
+                                       LDSJvstAudioProcessor::kLossNotchQMax,
+                                       parsed);
+
+    processor.setLossNotchQ(clamped);
+    tempNotchQInput.setText(juce::String(clamped, 3), juce::dontSendNotification);
+}
+
+void LDSJvstAudioProcessorEditor::setSelectedPresetIndex (int newIndex)
+
+{
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
     newIndex = juce::jlimit(0, presetCount - 1, newIndex);
+
     if (selectedPresetIndex == newIndex)
         return;
 
@@ -1829,13 +1982,35 @@ void LDSJvstAudioProcessorEditor::resized()
         if (auto* light = presetLights[i])
             light->setBounds(lightX, lightY0 + i * lightStep, lightSize, lightSize);
 
+    if constexpr (kEnableTempQInput)
+    {
+        tempNotchQLabel.setBounds(
+            juce::roundToInt(tempQLabelX * scale),
+            juce::roundToInt(tempQLabelY * scale),
+            juce::roundToInt(tempQLabelW * scale),
+            juce::roundToInt(tempQLabelH * scale));
+
+        tempNotchQInput.setBounds(
+            juce::roundToInt(tempQInputX * scale),
+            juce::roundToInt(tempQInputY * scale),
+            juce::roundToInt(tempQInputW * scale),
+            juce::roundToInt(tempQInputH * scale));
+    }
+
     // 让指示灯在最上层显示（覆盖TV.png），同时保留右下角缩放控件
+
     for (auto* light : presetLights)
         if (light != nullptr)
             light->toFront(false);
 
     // bypass 覆盖层也要在 TV.png 之上（否则 BYPASS.png 会被 TV 盖住）
     bypassHitArea.toFront(false);
+
+    if constexpr (kEnableTempQInput)
+    {
+        tempNotchQLabel.toFront(false);
+        tempNotchQInput.toFront(false);
+    }
 
     if (resizableCorner != nullptr)
         resizableCorner->toFront(false);
@@ -1864,6 +2039,12 @@ void LDSJvstAudioProcessorEditor::setRemotePulledOut (bool shouldBePulledOut)
 
 void LDSJvstAudioProcessorEditor::RemoteControlOverlay::timerCallback()
 {
+    if (owner.editorShuttingDown || owner.processor.isShuttingDownNow())
+    {
+        stopTimer();
+        return;
+    }
+
     bool stillNeeded = false;
     bool needRepaint = false;
 

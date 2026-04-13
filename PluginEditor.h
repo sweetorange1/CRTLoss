@@ -327,6 +327,11 @@ private:
     void toggleLossAlgorithmFromUI(); // 遥控器 ST/SAP：在两种频带丢失算法间切换
     void cycleCutModeOrSlopeFromTV(); // 遥控器 TV：硬裁剪 <-> HPF/LPF，且在HPF/LPF内轮换12/24/48dB
     float getVolumeOsdT() noexcept; // 0..1（时间进度），0 表示不显示
+    float getModeOsdT() noexcept;   // 0..1（TV/ST-SAP 状态时间进度），0 表示不显示
+
+    void pushChannelDigitFromRemote (int digit); // 遥控器 0-9：频道输入（最多4位）
+    juce::String getChannelOsdText() noexcept;   // 屏幕频道数字文案（固定4位）
+    void triggerChannelJumpNow();                // 将当前输入提交为频道数字显示
 
     // 临时测试控件：输入 Notch Q。
     // 若要直接屏蔽该控件，把这里改成 false 即可。
@@ -340,6 +345,23 @@ private:
     bool volumeOsdActive = false;
     double volumeOsdStartSeconds = 0.0;
     static constexpr double volumeOsdDurationSeconds = 3.0;
+
+    bool modeOsdActive = false;
+    double modeOsdStartSeconds = 0.0;
+    static constexpr double modeOsdDurationSeconds = 3.0;
+
+    // 遥控器频道输入（仅屏幕显示，不关联实际音频/预设逻辑）
+    juce::String pendingChannelDigits;
+    double pendingChannelLastInputSeconds = 0.0;
+    bool channelOsdActive = false;
+    juce::String channelDisplayText;
+    double channelOsdStartSeconds = 0.0;
+
+    static constexpr int kMaxChannelDigits = 4;
+    static constexpr double channelInputTimeoutSeconds = 3.0;
+    static constexpr double channelInputOsdDurationSeconds = 1.2;
+    static constexpr double presetChannelOsdDurationSeconds = 3.0;
+    double channelOsdCurrentDurationSeconds = channelInputOsdDurationSeconds;
 
     bool editorShuttingDown = false;
 

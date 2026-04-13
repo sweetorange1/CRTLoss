@@ -1457,81 +1457,55 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             gg.fillRect(sb);
         }
 
-        // 音量 OSD：画在屏幕上方（基准坐标：左上(135,129) 大小 340*35）
-        // 注意：这里处于“屏幕组件局部坐标系”，所以将基准坐标映射到 sb(0..W/H)
-        const float osdT = owner.getVolumeOsdT();
-        if (osdT > 0.0f)
+        // OSD 统一色调
+        const auto& presetParams = display_present::getPresetParams(preset);
+
+        juce::Colour accent;
+        switch (presetParams.bg.kind)
         {
-            // 前段全亮，尾段淡出
-            const float fade = 1.0f - juce::jlimit(0.0f, 1.0f, (osdT - 0.80f) / 0.20f);
+            case display_present::BackgroundKind::digitalGrid:         accent = juce::Colour::fromRGB(0x9A, 0xE6, 0xFF); break;
+            case display_present::BackgroundKind::amberVignette:       accent = juce::Colour::fromRGB(0xFF, 0xB0, 0x00); break;
+            case display_present::BackgroundKind::radarSweep:          accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
+            case display_present::BackgroundKind::phosphorBloom:       accent = juce::Colour::fromRGB(0x00, 0xFF, 0xC6); break;
+            case display_present::BackgroundKind::rainbowInterference: accent = juce::Colour::fromHSV(std::fmod((float) (juce::Time::getMillisecondCounterHiRes() * 0.001 * 0.18), 1.0f), 0.95f, 1.0f, 1.0f); break;
+            case display_present::BackgroundKind::dotMask:             accent = juce::Colour::fromRGB(0xFF, 0x4D, 0xB7); break;
+            case display_present::BackgroundKind::oceanBlobs:          accent = juce::Colour::fromRGB(0x4D, 0xB7, 0xFF); break;
+            case display_present::BackgroundKind::mirrorCross:         accent = juce::Colour::fromRGB(0x00, 0xFF, 0x66); break;
+            case display_present::BackgroundKind::barcode:             accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
+            case display_present::BackgroundKind::glitchStatic:        accent = juce::Colours::white; break;
+            case display_present::BackgroundKind::neonStarfield:       accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
+            case display_present::BackgroundKind::minimalVignette:     accent = juce::Colours::white; break;
+            case display_present::BackgroundKind::greenTerminal:       accent = juce::Colour::fromRGB(0x00, 0xFF, 0x66); break;
+            case display_present::BackgroundKind::legacySolid:
+            default:                                                  accent = juce::Colours::white; break;
+        }
 
-            const float minDb = LDSJvstAudioProcessor::kPreGainDbMin;
-            const float maxDb = LDSJvstAudioProcessor::kPreGainDbMax;
-            const float curDb = owner.processor.getPreGainDb();
-            const float u = juce::jlimit(0.0f, 1.0f, (curDb - minDb) / (maxDb - minDb));
+        // 频道 OSD：右上角，独立显示/消失（仅显示4位频道号）
+        const juce::String channelText = owner.getChannelOsdText();
+        if (channelText.isNotEmpty())
+        {
+            const float cox = sb.getWidth()  * (468.0f / 643.0f);
+            const float coy = sb.getHeight() * (68.0f  / 529.0f);
+            const float cow = sb.getWidth()  * (152.0f / 643.0f);
+            const float coh = sb.getHeight() * (44.0f  / 529.0f);
 
-            // 将“基准坐标”转换到屏幕局部坐标（screen: 107,120,643,529）
-            const float ox = sb.getWidth()  * (86.0f  / 643.0f); // 193 - 107
-            const float oy = sb.getHeight() * (64.0f  / 529.0f); // 184 - 120
-            const float ow = sb.getWidth()  * (486.0f / 643.0f);
-            const float oh = sb.getHeight() * (50.0f  / 529.0f);
+            const auto channelOuter = juce::Rectangle<float>(sb.getX() + cox, sb.getY() + coy, cow, coh);
 
-            const auto outer = juce::Rectangle<float>(sb.getX() + ox, sb.getY() + oy, ow, oh);
-            const auto inner = outer.reduced(6.0f, 6.0f);
+            const float channelFontSize = juce::jlimit(16.0f, 26.0f, channelOuter.getHeight() * 0.78f);
+            gg.setFont(juce::Font(channelFontSize, juce::Font::bold));
 
-            const auto& presetParams = display_present::getPresetParams(preset);
+            gg.setColour(juce::Colours::black.withAlpha(0.72f));
+            gg.drawText(channelText, channelOuter.translated(1.0f, 1.0f), juce::Justification::centred, true);
 
-            juce::Colour accent;
-            switch (presetParams.bg.kind)
-            {
-                case display_present::BackgroundKind::digitalGrid:         accent = juce::Colour::fromRGB(0x9A, 0xE6, 0xFF); break;
-                case display_present::BackgroundKind::amberVignette:       accent = juce::Colour::fromRGB(0xFF, 0xB0, 0x00); break;
-                case display_present::BackgroundKind::radarSweep:          accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
-                case display_present::BackgroundKind::phosphorBloom:       accent = juce::Colour::fromRGB(0x00, 0xFF, 0xC6); break;
-                case display_present::BackgroundKind::rainbowInterference: accent = juce::Colour::fromHSV(std::fmod((float) (juce::Time::getMillisecondCounterHiRes() * 0.001 * 0.18), 1.0f), 0.95f, 1.0f, 1.0f); break;
-                case display_present::BackgroundKind::dotMask:             accent = juce::Colour::fromRGB(0xFF, 0x4D, 0xB7); break;
-                case display_present::BackgroundKind::oceanBlobs:          accent = juce::Colour::fromRGB(0x4D, 0xB7, 0xFF); break;
-                case display_present::BackgroundKind::mirrorCross:         accent = juce::Colour::fromRGB(0x00, 0xFF, 0x66); break;
-                case display_present::BackgroundKind::barcode:             accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
-                case display_present::BackgroundKind::glitchStatic:        accent = juce::Colours::white; break;
-                case display_present::BackgroundKind::neonStarfield:       accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
-                case display_present::BackgroundKind::minimalVignette:     accent = juce::Colours::white; break;
-                case display_present::BackgroundKind::greenTerminal:       accent = juce::Colour::fromRGB(0x00, 0xFF, 0x66); break;
-                case display_present::BackgroundKind::legacySolid:
-                default:                                                  accent = juce::Colours::white; break;
-            }
+            gg.setColour(accent.withAlpha(0.98f));
+            gg.drawText(channelText, channelOuter, juce::Justification::centred, true);
+        }
 
-            // 背板（带一点预设色调）
-            gg.setColour(juce::Colours::black.withAlpha(0.55f * fade));
-            gg.fillRoundedRectangle(outer, 6.0f);
-            gg.setColour(accent.withAlpha(0.10f * fade));
-            gg.fillRoundedRectangle(outer, 6.0f);
-
-            // 外框
-            gg.setColour(accent.withAlpha(0.28f * fade));
-            gg.drawRoundedRectangle(outer, 6.0f, 1.0f);
-
-            // 刻度（10 段）
-            const int ticks = 10;
-            gg.setColour(accent.withAlpha(0.12f * fade));
-            for (int i = 1; i < ticks; ++i)
-            {
-                const float tx = inner.getX() + inner.getWidth() * ((float) i / (float) ticks);
-                gg.drawLine(tx, inner.getY(), tx, inner.getBottom(), 1.0f);
-            }
-
-            // 填充条
-            auto fill = inner;
-            fill.setWidth(inner.getWidth() * u);
-            gg.setColour(accent.withAlpha(0.85f * fade));
-            gg.fillRect(fill);
-
-            // 文本：VOL + 数值（dB）
-            const float fontSize = juce::jlimit(10.0f, 16.0f, outer.getHeight() * 0.60f);
-            gg.setFont(juce::Font(fontSize, juce::Font::bold));
-
-            const juce::String label = "VOL";
-            const juce::String value = juce::String(curDb >= 0.0f ? "+" : "") + juce::String(curDb, 0) + "dB";
+        // TV/ST-SAP 状态 OSD：左上角，独立显示/消失
+        const float modeT = owner.getModeOsdT();
+        if (modeT > 0.0f)
+        {
+            const float fade = 1.0f - juce::jlimit(0.0f, 1.0f, (modeT - 0.80f) / 0.20f);
 
             const int algoMode = owner.processor.getLossAlgorithmMode();
             const juce::String algoText = (algoMode == LDSJvstAudioProcessor::kLossAlgorithmUniformBandwidth)
@@ -1544,32 +1518,81 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                                            ? "TV: HARD MASK"
                                            : ("TV: HPF/LPF " + juce::String(cutSlopeDb) + "dB/oct");
 
+            const float mox = sb.getWidth()  * (20.0f  / 643.0f);
+            const float moy = sb.getHeight() * (68.0f  / 529.0f);
+            const float mow = sb.getWidth()  * (256.0f / 643.0f);
+            const float moh = sb.getHeight() * (72.0f  / 529.0f);
+
+            const auto modeOuter = juce::Rectangle<float>(sb.getX() + mox, sb.getY() + moy, mow, moh);
+
+            const float lineFontSize = juce::jlimit(12.0f, 17.0f, modeOuter.getHeight() * 0.33f);
+            gg.setFont(juce::Font(lineFontSize, juce::Font::plain));
+
+            auto line1 = modeOuter;
+            line1.removeFromTop(modeOuter.getHeight() * 0.52f);
+            auto line2 = modeOuter;
+            line2.removeFromTop(modeOuter.getHeight() * 0.24f);
+
+            gg.setColour(juce::Colours::black.withAlpha(0.70f * fade));
+            gg.drawText(cutText, line1.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
+            gg.drawText(algoText, line2.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
+
+            gg.setColour(accent.withAlpha(0.96f * fade));
+            gg.drawText(cutText, line1, juce::Justification::centredTop, true);
+            gg.drawText(algoText, line2, juce::Justification::centredTop, true);
+        }
+
+        // 音量 OSD：屏幕下方，独立显示/消失
+        const float osdT = owner.getVolumeOsdT();
+        if (osdT > 0.0f)
+        {
+            const float fade = 1.0f - juce::jlimit(0.0f, 1.0f, (osdT - 0.80f) / 0.20f);
+
+            const float minDb = LDSJvstAudioProcessor::kPreGainDbMin;
+            const float maxDb = LDSJvstAudioProcessor::kPreGainDbMax;
+            const float curDb = owner.processor.getPreGainDb();
+            const float u = juce::jlimit(0.0f, 1.0f, (curDb - minDb) / (maxDb - minDb));
+
+            const float ox = sb.getWidth()  * (96.0f  / 643.0f);
+            const float oy = sb.getHeight() * (375.0f / 529.0f);
+            const float ow = sb.getWidth()  * (460.0f / 643.0f);
+            const float oh = sb.getHeight() * (43.0f  / 529.0f);
+
+            const auto outer = juce::Rectangle<float>(sb.getX() + ox, sb.getY() + oy, ow, oh);
+            const auto inner = outer.reduced(6.0f, 6.0f);
+
+            gg.setColour(juce::Colours::black.withAlpha(0.55f * fade));
+            gg.fillRoundedRectangle(outer, 6.0f);
+            gg.setColour(accent.withAlpha(0.10f * fade));
+            gg.fillRoundedRectangle(outer, 6.0f);
+
+            gg.setColour(accent.withAlpha(0.28f * fade));
+            gg.drawRoundedRectangle(outer, 6.0f, 1.0f);
+
+            const int ticks = 10;
+            gg.setColour(accent.withAlpha(0.12f * fade));
+            for (int i = 1; i < ticks; ++i)
+            {
+                const float tx = inner.getX() + inner.getWidth() * ((float) i / (float) ticks);
+                gg.drawLine(tx, inner.getY(), tx, inner.getBottom(), 1.0f);
+            }
+
+            auto fill = inner;
+            fill.setWidth(inner.getWidth() * u);
+            gg.setColour(accent.withAlpha(0.85f * fade));
+            gg.fillRect(fill);
+
+            const float fontSize = juce::jlimit(10.0f, 16.0f, outer.getHeight() * 0.45f);
+            gg.setFont(juce::Font(fontSize, juce::Font::bold));
+
+            const juce::String label = "VOL";
+            const juce::String value = juce::String(curDb >= 0.0f ? "+" : "") + juce::String(curDb, 0) + "dB";
+
             gg.setColour(juce::Colours::black.withAlpha(0.65f * fade));
-            gg.drawText(label + " " + value, outer.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
+            gg.drawText(label + " " + value, outer.translated(1.0f, 1.0f), juce::Justification::centred, true);
 
             gg.setColour(accent.withAlpha(0.95f * fade));
-            gg.drawText(label + " " + value, outer, juce::Justification::centredTop, true);
-
-            auto algoRect = outer;
-            algoRect.removeFromTop(outer.getHeight() * 0.43f);
-            const float algoFontSize = juce::jlimit(8.0f, 12.0f, outer.getHeight() * 0.24f);
-            gg.setFont(juce::Font(algoFontSize, juce::Font::plain));
-
-            gg.setColour(juce::Colours::black.withAlpha(0.65f * fade));
-            gg.drawText(algoText, algoRect.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
-
-            gg.setColour(accent.withAlpha(0.88f * fade));
-            gg.drawText(algoText, algoRect, juce::Justification::centredTop, true);
-
-            auto cutRect = algoRect;
-            cutRect.translate(0.0f, outer.getHeight() * 0.22f);
-
-            gg.setColour(juce::Colours::black.withAlpha(0.60f * fade));
-            gg.drawText(cutText, cutRect.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
-
-            gg.setColour(accent.withAlpha(0.82f * fade));
-            gg.drawText(cutText, cutRect, juce::Justification::centredTop, true);
-
+            gg.drawText(label + " " + value, outer, juce::Justification::centred, true);
         }
 
         // 边框线（离屏也画一遍；最终 warp 后还能保持统一）
@@ -2023,7 +2046,7 @@ LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& 
     resizeConstrainer.setSizeLimits(320, 240, 1600, 1200);
     setConstrainer(&resizeConstrainer);
 
-    setSize(baseEditorWidth, baseEditorHeight);
+    setSize(1400, 1050);
 
     addAndMakeVisible(oscilloscope);
     addAndMakeVisible(bypassHitArea);
@@ -2183,9 +2206,8 @@ void LDSJvstAudioProcessorEditor::toggleLossAlgorithmFromUI()
 
     processor.toggleLossAlgorithmMode();
 
-    // 复用 OSD 生命周期，让用户切换后立即看到反馈信息
-    volumeOsdActive = true;
-    volumeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    modeOsdActive = true;
+    modeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
     oscilloscope.repaint();
 }
@@ -2197,8 +2219,8 @@ void LDSJvstAudioProcessorEditor::cycleCutModeOrSlopeFromTV()
 
     processor.cycleCutModeOrSlopeFromTV();
 
-    volumeOsdActive = true;
-    volumeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    modeOsdActive = true;
+    modeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
     oscilloscope.repaint();
 }
@@ -2223,7 +2245,101 @@ float LDSJvstAudioProcessorEditor::getVolumeOsdT() noexcept
     return juce::jlimit(0.0f, 1.0f, t);
 }
 
+float LDSJvstAudioProcessorEditor::getModeOsdT() noexcept
+{
+    if (! modeOsdActive)
+        return 0.0f;
+
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    const double dt = now - modeOsdStartSeconds;
+    const float t = (float) (dt / modeOsdDurationSeconds);
+
+    if (t >= 1.0f)
+    {
+        modeOsdActive = false;
+        return 0.0f;
+    }
+
+    return juce::jlimit(0.0f, 1.0f, t);
+}
+
+void LDSJvstAudioProcessorEditor::pushChannelDigitFromRemote (int digit)
+{
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
+    if (digit < 0 || digit > 9)
+        return;
+
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
+    // 输入超时后重新开始一轮输入
+    if ((! pendingChannelDigits.isEmpty())
+        && (now - pendingChannelLastInputSeconds >= channelInputTimeoutSeconds))
+    {
+        pendingChannelDigits.clear();
+    }
+
+    channelOsdActive = false;
+
+    if (pendingChannelDigits.length() >= kMaxChannelDigits)
+        pendingChannelDigits.clear();
+
+    pendingChannelDigits += juce::String(digit);
+    pendingChannelLastInputSeconds = now;
+
+    // 满4位立即“提交”频道
+    if (pendingChannelDigits.length() >= kMaxChannelDigits)
+        triggerChannelJumpNow();
+
+    oscilloscope.repaint();
+}
+
+void LDSJvstAudioProcessorEditor::triggerChannelJumpNow()
+{
+    if (pendingChannelDigits.isEmpty())
+        return;
+
+    channelDisplayText = pendingChannelDigits;
+    pendingChannelDigits.clear();
+
+    channelOsdCurrentDurationSeconds = channelInputOsdDurationSeconds;
+    channelOsdActive = true;
+    channelOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+}
+
+juce::String LDSJvstAudioProcessorEditor::getChannelOsdText() noexcept
+{
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
+    if (! pendingChannelDigits.isEmpty())
+    {
+        const double idleSec = now - pendingChannelLastInputSeconds;
+
+        // 3秒不输入：提交当前频道
+        if (idleSec >= channelInputTimeoutSeconds)
+            triggerChannelJumpNow();
+        else
+            return pendingChannelDigits.paddedLeft('-', kMaxChannelDigits);
+    }
+
+    if (channelOsdActive)
+    {
+        const double dt = now - channelOsdStartSeconds;
+        if (dt >= channelOsdCurrentDurationSeconds)
+        {
+            channelOsdActive = false;
+            return {};
+        }
+
+        return channelDisplayText.paddedLeft('-', kMaxChannelDigits);
+    }
+
+    return {};
+}
+
 void LDSJvstAudioProcessorEditor::refreshTempNotchQInputText()
+
 {
     if constexpr (! kEnableTempQInput)
         return;
@@ -2257,8 +2373,18 @@ void LDSJvstAudioProcessorEditor::setSelectedPresetIndex (int newIndex)
 
     newIndex = juce::jlimit(0, presetCount - 1, newIndex);
 
+    // 预设 0-11 视为频道 0-11：点击/切换时都显示频道，3 秒后消失
+    pendingChannelDigits.clear();
+    channelDisplayText = juce::String(newIndex);
+    channelOsdCurrentDurationSeconds = presetChannelOsdDurationSeconds;
+    channelOsdActive = true;
+    channelOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
     if (selectedPresetIndex == newIndex)
+    {
+        oscilloscope.repaint();
         return;
+    }
 
     // 启动预设切换动画
     presetTransitionActive = true;
@@ -2720,6 +2846,17 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
             else if (std::strcmp (b.name, "ST/SAP") == 0)
             {
                 owner.toggleLossAlgorithmFromUI();
+            }
+            // 数字键：输入频道（最多4位；3秒不输入自动跳转）
+            else
+            {
+                const juce::String buttonName = juce::String::fromUTF8(b.name);
+                if (buttonName.startsWith("数字"))
+                {
+                    const juce::juce_wchar c = buttonName.getLastCharacter();
+                    if (c >= '0' && c <= '9')
+                        owner.pushChannelDigitFromRemote((int) (c - '0'));
+                }
             }
 
         }

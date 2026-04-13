@@ -12,6 +12,7 @@ public:
     ~LDSJvstAudioProcessorEditor() override;
 
     void paint(juce::Graphics&) override;
+    void paintOverChildren(juce::Graphics&) override;
     void resized() override;
 
 private:
@@ -189,6 +190,9 @@ private:
         bool limiterDragActive = false;
         float limiterDragStartThreshold = 1.0f;
 
+        // 频段灯带高低切三角拖拽
+        int cutHandleDragMode = 0; // 0=none, 1=lowCut, 2=highCut
+
         // 屏幕离屏缓冲：用于做“按行 remap”的电视机行同步噪声扭曲
         juce::Image screenBase;
         juce::Image screenWarp;
@@ -321,7 +325,7 @@ private:
     // 前置增益（遥控器 VOL+/VOL-）+ 电视屏幕 OSD 控制条
     void nudgePreGainDbFromUI (float deltaDb);
     void toggleLossAlgorithmFromUI(); // 遥控器 ST/SAP：在两种频带丢失算法间切换
-    void toggleStrictBandCutFromUI(); // 遥控器 TV：切换“严格频段硬切”
+    void cycleCutModeOrSlopeFromTV(); // 遥控器 TV：硬裁剪 <-> HPF/LPF，且在HPF/LPF内轮换12/24/48dB
     float getVolumeOsdT() noexcept; // 0..1（时间进度），0 表示不显示
 
     // 临时测试控件：输入 Notch Q。

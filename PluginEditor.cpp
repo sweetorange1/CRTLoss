@@ -4,6 +4,11 @@
 #include "display_present.h"
 #include <cstring>
 
+namespace
+{
+    static constexpr auto kPluginUiVersionText = "v1.0.8";
+}
+
 // --- BypassHitArea ---
 void LDSJvstAudioProcessorEditor::BypassHitArea::paint (juce::Graphics& g)
 {
@@ -46,7 +51,87 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::timerCallback()
 
 void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseDown (const juce::MouseEvent& e)
 {
+    processor.setCutDragActive(false);
+
     const auto b = getLocalBounds().toFloat();
+
+    const int bands = kBandGridCount;
+    if (bands > 0)
+    {
+
+        const float marginX = juce::jmax(8.0f, b.getWidth() * 0.03f);
+        const float gridAreaW = juce::jmax(50.0f, b.getWidth() - marginX * 2.0f);
+        const float gap = juce::jmax(0.0f, juce::jmin(1.0f, b.getWidth() * 0.0012f));
+        const float cellW = juce::jmax(1.0f, (gridAreaW - gap * (float) (bands - 1)) / (float) bands);
+        const float cellH = juce::jmax(3.0f, b.getHeight() * 0.020f);
+
+        const float x0 = b.getX() + (b.getWidth() - (cellW * (float) bands + gap * (float) (bands - 1))) * 0.5f;
+        const float x1 = x0 + cellW * (float) bands + gap * (float) (bands - 1);
+        const float y0 = b.getBottom() - cellH - juce::jmax(2.0f, b.getHeight() * 0.018f);
+
+        const float logMin = std::log(LDSJvstAudioProcessor::kLowCutHzMin);
+        const float logMax = std::log(LDSJvstAudioProcessor::kHighCutHzMax);
+        const float logSpan = juce::jmax(0.0001f, logMax - logMin);
+
+        auto hzToX = [&](float hz)
+        {
+            const float h = juce::jlimit(LDSJvstAudioProcessor::kLowCutHzMin,
+                                         LDSJvstAudioProcessor::kHighCutHzMax,
+                                         hz);
+            const float t = (std::log(h) - logMin) / logSpan;
+            return x0 + juce::jlimit(0.0f, 1.0f, t) * (x1 - x0);
+        };
+
+        auto xToHz = [&](float x)
+        {
+            const float t = juce::jlimit(0.0f, 1.0f, (x - x0) / juce::jmax(1.0f, x1 - x0));
+            return std::exp(logMin + t * logSpan);
+        };
+
+        const float lowX = hzToX(processor.getLowCutHz());
+        const float highX = hzToX(processor.getHighCutHz());
+        const float triW = juce::jmax(9.0f, cellW * 2.3f);
+        const float triH = juce::jmax(6.0f, cellH * 2.2f);
+
+        const auto lowHit = juce::Rectangle<float>(lowX - triW * 0.6f, y0 - triH - 4.0f, triW * 1.2f, triH + 8.0f);
+        const auto highHit = juce::Rectangle<float>(highX - triW * 0.6f, y0 - triH - 4.0f, triW * 1.2f, triH + 8.0f);
+
+        if (lowHit.contains(e.position))
+        {
+            cutHandleDragMode = 1;
+            processor.setCutDragActive(true);
+            processor.setLowCutHz(xToHz(e.position.x));
+            repaint();
+            return;
+        }
+
+        if (highHit.contains(e.position))
+        {
+            cutHandleDragMode = 2;
+            processor.setCutDragActive(true);
+            processor.setHighCutHz(xToHz(e.position.x));
+            repaint();
+            return;
+        }
+
+        const auto stripHit = juce::Rectangle<float>(x0, y0 - triH, x1 - x0, cellH + triH + 6.0f);
+        if (stripHit.contains(e.position))
+        {
+            const float dxLow = std::abs(e.position.x - lowX);
+            const float dxHigh = std::abs(e.position.x - highX);
+            cutHandleDragMode = (dxLow <= dxHigh) ? 1 : 2;
+            processor.setCutDragActive(true);
+
+            if (cutHandleDragMode == 1)
+                processor.setLowCutHz(xToHz(e.position.x));
+            else
+                processor.setHighCutHz(xToHz(e.position.x));
+
+            repaint();
+            return;
+        }
+
+    }
 
     const float midY = b.getCentreY();
     const float scaleY = b.getHeight() * 0.40f;
@@ -65,6 +150,37 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseDown (const juce::
 
 void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseDrag (const juce::MouseEvent& e)
 {
+    if (cutHandleDragMode != 0)
+    {
+        const auto b = getLocalBounds().toFloat();
+        const int bands = kBandGridCount;
+        if (bands > 0)
+        {
+            const float marginX = juce::jmax(8.0f, b.getWidth() * 0.03f);
+            const float gridAreaW = juce::jmax(50.0f, b.getWidth() - marginX * 2.0f);
+            const float gap = juce::jmax(0.0f, juce::jmin(1.0f, b.getWidth() * 0.0012f));
+            const float cellW = juce::jmax(1.0f, (gridAreaW - gap * (float) (bands - 1)) / (float) bands);
+
+            const float x0 = b.getX() + (b.getWidth() - (cellW * (float) bands + gap * (float) (bands - 1))) * 0.5f;
+            const float x1 = x0 + cellW * (float) bands + gap * (float) (bands - 1);
+
+            const float logMin = std::log(LDSJvstAudioProcessor::kLowCutHzMin);
+            const float logMax = std::log(LDSJvstAudioProcessor::kHighCutHzMax);
+            const float logSpan = juce::jmax(0.0001f, logMax - logMin);
+
+            const float t = juce::jlimit(0.0f, 1.0f, (e.position.x - x0) / juce::jmax(1.0f, x1 - x0));
+            const float hz = std::exp(logMin + t * logSpan);
+
+            if (cutHandleDragMode == 1)
+                processor.setLowCutHz(hz);
+            else
+                processor.setHighCutHz(hz);
+
+            repaint();
+        }
+        return;
+    }
+
     if (! limiterDragActive)
         return;
 
@@ -83,6 +199,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseDrag (const juce::
 void LDSJvstAudioProcessorEditor::OscilloscopeComponent::mouseUp (const juce::MouseEvent&)
 {
     limiterDragActive = false;
+    cutHandleDragMode = 0;
+    processor.setCutDragActive(false);
 }
 
 void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g)
@@ -1419,9 +1537,12 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const juce::String algoText = (algoMode == LDSJvstAudioProcessor::kLossAlgorithmUniformBandwidth)
                                             ? "ST/SAP: UNIFORM BW"
                                             : "ST/SAP: LEGACY Q";
-            const juce::String strictText = owner.processor.isStrictBandCutEnabled()
-                                              ? "TV: STRICT CUT ON"
-                                              : "TV: STRICT CUT OFF";
+
+            const int cutMode = owner.processor.getCutMode();
+            const int cutSlopeDb = owner.processor.getCutSlopeDbPerOct();
+            const juce::String cutText = (cutMode == LDSJvstAudioProcessor::kCutModeHardMask)
+                                           ? "TV: HARD MASK"
+                                           : ("TV: HPF/LPF " + juce::String(cutSlopeDb) + "dB/oct");
 
             gg.setColour(juce::Colours::black.withAlpha(0.65f * fade));
             gg.drawText(label + " " + value, outer.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
@@ -1434,16 +1555,21 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const float algoFontSize = juce::jlimit(8.0f, 12.0f, outer.getHeight() * 0.24f);
             gg.setFont(juce::Font(algoFontSize, juce::Font::plain));
 
-            auto strictRect = algoRect;
-            strictRect.removeFromTop(algoRect.getHeight() * 0.5f);
-
             gg.setColour(juce::Colours::black.withAlpha(0.65f * fade));
             gg.drawText(algoText, algoRect.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
-            gg.drawText(strictText, strictRect.translated(1.0f, 1.0f), juce::Justification::centredBottom, true);
 
             gg.setColour(accent.withAlpha(0.88f * fade));
             gg.drawText(algoText, algoRect, juce::Justification::centredTop, true);
-            gg.drawText(strictText, strictRect, juce::Justification::centredBottom, true);
+
+            auto cutRect = algoRect;
+            cutRect.translate(0.0f, outer.getHeight() * 0.22f);
+
+            gg.setColour(juce::Colours::black.withAlpha(0.60f * fade));
+            gg.drawText(cutText, cutRect.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
+
+            gg.setColour(accent.withAlpha(0.82f * fade));
+            gg.drawText(cutText, cutRect, juce::Justification::centredTop, true);
+
         }
 
         // 边框线（离屏也画一遍；最终 warp 后还能保持统一）
@@ -1723,11 +1849,41 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const auto dimColour = juce::Colours::black.withAlpha(juce::jlimit(0.52f, 0.84f, 0.72f - 0.4f * accent));
             const auto borderColour = base.withAlpha(juce::jlimit(0.10f, 0.38f, 0.12f + 0.8f * accent));
 
+            const float stripX0 = x0;
+            const float stripX1 = x0 + cellW * (float) bands + gap * (float) (bands - 1);
+
+            const float lowCutHz = processor.getLowCutHz();
+            const float highCutHz = processor.getHighCutHz();
+
+            const float logMin = std::log(LDSJvstAudioProcessor::kLowCutHzMin);
+            const float logMax = std::log(LDSJvstAudioProcessor::kHighCutHzMax);
+            const float logSpan = juce::jmax(0.0001f, logMax - logMin);
+
+            auto hzToX = [&](float hz)
+            {
+                const float h = juce::jlimit(LDSJvstAudioProcessor::kLowCutHzMin,
+                                             LDSJvstAudioProcessor::kHighCutHzMax,
+                                             hz);
+                const float t = (std::log(h) - logMin) / logSpan;
+                return stripX0 + juce::jlimit(0.0f, 1.0f, t) * (stripX1 - stripX0);
+            };
+
+            const float lowCutX = hzToX(lowCutHz);
+            const float highCutX = hzToX(highCutHz);
+
+            const int cutMode = processor.getCutMode();
+            const int cutSlope = processor.getCutSlopeDbPerOct();
+            const int cutAngleDeg = processor.getCutSlopeAngleDeg();
+
             for (int i = 0; i < bands; ++i)
             {
                 const float x = x0 + (float) i * (cellW + gap);
                 const auto r = juce::Rectangle<float>(x, y0, cellW, cellH);
-                const bool pass = lossMaskSnapshotUI[i] != 0;
+                const float cx = r.getCentreX();
+
+                const bool inCutZone = (cx < lowCutX) || (cx > highCutX);
+                const bool passByMask = lossMaskSnapshotUI[i] != 0;
+                const bool pass = (! inCutZone) && passByMask;
 
                 if (preset == 3 && pass)
                 {
@@ -1742,6 +1898,112 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
 
                 g.setColour(borderColour);
                 g.drawRect(r, 0.35f);
+            }
+
+            const float triW = juce::jmax(9.0f, cellW * 2.3f);
+            const float triH = juce::jmax(6.0f, cellH * 2.2f);
+
+            const bool rainbowHandle = (preset == 3);
+            const float rainbowTimePhase = std::fmod((float) (juce::Time::getMillisecondCounterHiRes() * 0.001 * 0.22), 1.0f);
+
+            auto drawRainbowLine = [&](float x1, float y1, float x2, float y2, float width, float alpha)
+            {
+                constexpr int kSegments = 24;
+                for (int s = 0; s < kSegments; ++s)
+                {
+                    const float t0 = (float) s / (float) kSegments;
+                    const float t1 = (float) (s + 1) / (float) kSegments;
+                    const float xa = x1 + (x2 - x1) * t0;
+                    const float ya = y1 + (y2 - y1) * t0;
+                    const float xb = x1 + (x2 - x1) * t1;
+                    const float yb = y1 + (y2 - y1) * t1;
+                    const float hue = std::fmod(t0 + rainbowTimePhase, 1.0f);
+                    g.setColour(juce::Colour::fromHSV(hue, 0.88f, 1.0f, alpha));
+                    g.drawLine(xa, ya, xb, yb, width);
+                }
+            };
+
+            auto drawDownTriangle = [&](float cx, juce::Colour c)
+            {
+                juce::Path tri;
+                const float topY = y0 - triH - 2.0f;
+                tri.startNewSubPath(cx - triW * 0.5f, topY);
+                tri.lineTo(cx + triW * 0.5f, topY);
+                tri.lineTo(cx, y0 - 1.0f);
+                tri.closeSubPath();
+
+                g.setColour(juce::Colours::black.withAlpha(0.45f));
+                g.fillPath(tri);
+
+                if (rainbowHandle)
+                {
+                    const float hueA = std::fmod(rainbowTimePhase, 1.0f);
+                    const float hueB = std::fmod(rainbowTimePhase + 0.34f, 1.0f);
+
+                    juce::ColourGradient grad(juce::Colour::fromHSV(hueA, 0.88f, 1.0f, 0.32f), cx - triW * 0.5f, topY,
+                                              juce::Colour::fromHSV(hueB, 0.88f, 1.0f, 0.32f), cx + triW * 0.5f, y0 - 1.0f,
+                                              false);
+                    g.setGradientFill(grad);
+                    g.fillPath(tri);
+
+                    juce::ColourGradient strokeGrad(juce::Colour::fromHSV(hueA, 0.88f, 1.0f, 0.92f), cx - triW * 0.5f, topY,
+                                                    juce::Colour::fromHSV(hueB, 0.88f, 1.0f, 0.92f), cx + triW * 0.5f, y0 - 1.0f,
+                                                    false);
+                    g.setGradientFill(strokeGrad);
+                    g.strokePath(tri, juce::PathStrokeType(1.1f));
+                    return;
+                }
+
+                g.setColour(c.withAlpha(0.92f));
+                g.strokePath(tri, juce::PathStrokeType(1.1f));
+                g.setColour(c.withAlpha(0.30f));
+                g.fillPath(tri);
+            };
+
+            auto drawSlopeLineHandle = [&](float cx, juce::Colour c, bool isLowCutHandle)
+            {
+                const float yLine = y0 - triH * 0.60f;
+                const float clampedAngle = (float) juce::jlimit(0, 90, cutAngleDeg);
+                const float len = triW * 1.90f;
+                const float dx = len * std::cos(juce::degreesToRadians(clampedAngle));
+                const float dy = len * std::sin(juce::degreesToRadians(clampedAngle));
+
+                const float x0Line = isLowCutHandle ? (cx + dx * 0.5f) : (cx - dx * 0.5f);
+                const float y0Line = yLine - dy * 0.5f;
+                const float x1Line = isLowCutHandle ? (cx - dx * 0.5f) : (cx + dx * 0.5f);
+                const float y1Line = yLine + dy * 0.5f;
+
+                const float strokeW = (cutSlope >= LDSJvstAudioProcessor::kCutSlope48dB) ? 2.6f
+                                    : (cutSlope >= LDSJvstAudioProcessor::kCutSlope24dB) ? 2.0f
+                                    : 1.4f;
+
+                if (rainbowHandle)
+                {
+                    drawRainbowLine(x0Line, y0Line, x1Line, y1Line, strokeW + 2.0f, 0.30f);
+                    drawRainbowLine(x0Line, y0Line, x1Line, y1Line, strokeW, 0.98f);
+                    return;
+                }
+
+                g.setColour(c.withAlpha(0.32f));
+                g.drawLine(x0Line, y0Line, x1Line, y1Line, strokeW + 2.0f);
+
+                g.setColour(c.withAlpha(0.98f));
+                g.drawLine(x0Line, y0Line, x1Line, y1Line, strokeW);
+            };
+
+            const auto hardMaskHandleColour = base.withAlpha(0.95f);
+            const auto hpfLpfHandleColour = base.brighter(0.10f).withAlpha(0.98f);
+
+            if (cutMode == LDSJvstAudioProcessor::kCutModeHardMask)
+            {
+                drawDownTriangle(lowCutX, hardMaskHandleColour);
+                drawDownTriangle(highCutX, hardMaskHandleColour);
+            }
+            else
+            {
+                // HPF/LPF 模式下仅显示斜线手柄（角度对应12/24/48 dB每倍频程）。
+                drawSlopeLineHandle(lowCutX, hpfLpfHandleColour, true);
+                drawSlopeLineHandle(highCutX, hpfLpfHandleColour, false);
             }
 
         }
@@ -1823,6 +2085,21 @@ LDSJvstAudioProcessorEditor::~LDSJvstAudioProcessorEditor()
 void LDSJvstAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colours::black);
+}
+
+void LDSJvstAudioProcessorEditor::paintOverChildren(juce::Graphics& g)
+{
+    const auto area = getLocalBounds().toFloat();
+    const float marginX = juce::jmax(5.0f, area.getWidth() * 0.008f);
+    const float marginY = juce::jmax(4.0f, area.getHeight() * 0.006f);
+    const float h = juce::jmax(9.0f, area.getHeight() * 0.016f);
+    const float w = juce::jmax(52.0f, area.getWidth() * 0.075f);
+
+    const auto tag = juce::Rectangle<float>(area.getRight() - marginX - w, area.getY() + marginY, w, h);
+
+    g.setFont(juce::Font(juce::jmax(7.0f, h * 0.70f), juce::Font::plain));
+    g.setColour(juce::Colours::black.withAlpha(0.50f));
+    g.drawText(kPluginUiVersionText, tag, juce::Justification::centredRight, true);
 }
 
 void LDSJvstAudioProcessorEditor::toggleBypassFromUI()
@@ -1913,12 +2190,12 @@ void LDSJvstAudioProcessorEditor::toggleLossAlgorithmFromUI()
     oscilloscope.repaint();
 }
 
-void LDSJvstAudioProcessorEditor::toggleStrictBandCutFromUI()
+void LDSJvstAudioProcessorEditor::cycleCutModeOrSlopeFromTV()
 {
     if (editorShuttingDown || processor.isShuttingDownNow())
         return;
 
-    processor.toggleStrictBandCutEnabled();
+    processor.cycleCutModeOrSlopeFromTV();
 
     volumeOsdActive = true;
     volumeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
@@ -1926,7 +2203,9 @@ void LDSJvstAudioProcessorEditor::toggleStrictBandCutFromUI()
     oscilloscope.repaint();
 }
 
+
 float LDSJvstAudioProcessorEditor::getVolumeOsdT() noexcept
+
 {
     if (! volumeOsdActive)
         return 0.0f;
@@ -2432,16 +2711,17 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
                 const int prev = (cur + presetCount - 1) % presetCount;
                 owner.setSelectedPresetIndex(prev);
             }
+            // TV：切换高低切算法与斜率（HardMask <-> HPF/LPF 12/24/48）
+            else if (std::strcmp (b.name, "TV") == 0)
+            {
+                owner.cycleCutModeOrSlopeFromTV();
+            }
             // ST/SAP：切换频带丢失算法（Legacy <-> Uniform Bandwidth）
             else if (std::strcmp (b.name, "ST/SAP") == 0)
             {
                 owner.toggleLossAlgorithmFromUI();
             }
-            // TV：切换严格频段硬切（开启后按频段边界做频域硬掩码）
-            else if (std::strcmp (b.name, "TV") == 0)
-            {
-                owner.toggleStrictBandCutFromUI();
-            }
+
         }
 
         return;

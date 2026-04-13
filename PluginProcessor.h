@@ -112,15 +112,100 @@ public:
                                  : kLossAlgorithmLegacy);
     }
 
-    // 严格频段硬切模式：开启后使用频域硬掩码，尽可能将“丢失频段”切得更干净
-    bool isStrictBandCutEnabled() const noexcept { return strictBandCutEnabled.load(std::memory_order_relaxed); }
-    void setStrictBandCutEnabled(bool enabled) noexcept
+    // 频段丢失调度前的高低切（Hz）
+    static constexpr float kLowCutHzMin = 20.0f;
+    static constexpr float kLowCutHzMax = 20000.0f;
+    static constexpr float kHighCutHzMin = 20.0f;
+    static constexpr float kHighCutHzMax = 20000.0f;
+
+    // 高低切算法：
+    // 0 = Hard Mask（当前频段掩码硬裁剪）
+    // 1 = HPF/LPF（音频链路中的高通/低通滤波链）
+    static constexpr int kCutModeHardMask = 0;
+    static constexpr int kCutModeHpfLpf = 1;
+
+    // HPF/LPF 斜率（内部DSP仍以 dB/oct 处理）
+    static constexpr int kCutSlope12dB = 12;
+    static constexpr int kCutSlope24dB = 24;
+    static constexpr int kCutSlope48dB = 48;
+
+    // HPF/LPF 手柄可视化角度（用于界面显示与配置认知）
+    static constexpr int kCutAngle12Deg = 45;
+    static constexpr int kCutAngle24Deg = 60;
+    static constexpr int kCutAngle48Deg = 75;
+
+    static int cutSlopeDbPerOctToAngleDeg(int slopeDbPerOct) noexcept
     {
-        strictBandCutEnabled.store(enabled, std::memory_order_relaxed);
+        if (slopeDbPerOct >= kCutSlope48dB)
+            return kCutAngle48Deg;
+        if (slopeDbPerOct >= kCutSlope24dB)
+            return kCutAngle24Deg;
+        return kCutAngle12Deg;
     }
-    void toggleStrictBandCutEnabled() noexcept
+
+    float getLowCutHz() const noexcept { return lowCutHz.load(std::memory_order_relaxed); }
+    float getHighCutHz() const noexcept { return highCutHz.load(std::memory_order_relaxed); }
+    int getCutMode() const noexcept { return cutMode.load(std::memory_order_relaxed); }
+    int getCutSlopeDbPerOct() const noexcept { return cutSlopeDbPerOct.load(std::memory_order_relaxed); }
+    int getCutSlopeAngleDeg() const noexcept { return cutSlopeDbPerOctToAngleDeg(getCutSlopeDbPerOct()); }
+
+    void setLowCutHz(float hz) noexcept
     {
-        setStrictBandCutEnabled(! isStrictBandCutEnabled());
+        const float hi = getHighCutHz();
+        const float clamped = juce::jlimit(kLowCutHzMin, juce::jmin(kLowCutHzMax, hi), hz);
+        lowCutHz.store(clamped, std::memory_order_relaxed);
+    }
+
+    void setHighCutHz(float hz) noexcept
+    {
+        const float lo = getLowCutHz();
+        const float clamped = juce::jlimit(juce::jmax(kHighCutHzMin, lo), kHighCutHzMax, hz);
+        highCutHz.store(clamped, std::memory_order_relaxed);
+    }
+
+    void setCutMode(int mode) noexcept
+    {
+        cutMode.store(juce::jlimit(kCutModeHardMask, kCutModeHpfLpf, mode), std::memory_order_relaxed);
+    }
+
+    void setCutSlopeDbPerOct(int slope) noexcept
+    {
+        int normalized = kCutSlope12dB;
+        if (slope >= kCutSlope48dB)
+            normalized = kCutSlope48dB;
+        else if (slope >= kCutSlope24dB)
+            normalized = kCutSlope24dB;
+        cutSlopeDbPerOct.store(normalized, std::memory_order_relaxed);
+    }
+
+    void setCutDragActive(bool active) noexcept
+    {
+        cutDragActive.store(active, std::memory_order_release);
+    }
+
+    bool isCutDragActive() const noexcept
+    {
+        return cutDragActive.load(std::memory_order_acquire);
+    }
+
+    void cycleCutModeOrSlopeFromTV() noexcept
+    {
+        const int mode = getCutMode();
+        const int slope = getCutSlopeDbPerOct();
+
+        if (mode == kCutModeHardMask)
+        {
+            setCutMode(kCutModeHpfLpf);
+            setCutSlopeDbPerOct(kCutSlope12dB);
+            return;
+        }
+
+        if (slope == kCutSlope12dB)
+            setCutSlopeDbPerOct(kCutSlope24dB);
+        else if (slope == kCutSlope24dB)
+            setCutSlopeDbPerOct(kCutSlope48dB);
+        else
+            setCutMode(kCutModeHardMask);
     }
 
     std::atomic<bool> bypassed { false };
@@ -144,6 +229,9 @@ private:
     void initLossPresets();
     void ensureLossFilters(double sampleRate);
     void retriggerLossMask(double nowSeconds);
+    void applyCutMaskToLossMask() noexcept;
+    void ensureCutFilters(double sampleRate);
+    void processHpfLpfCut(juce::AudioBuffer<float>& buffer) noexcept;
     static float getLossBandCenterHz(int bandIndex) noexcept;
     static bool isBpmSequencedPreset(int presetIndex) noexcept;
 
@@ -175,9 +263,14 @@ private:
     std::atomic<float> limiterThreshold { 1.0f };
     std::atomic<float> lossNotchQ { 6.0f };
     std::atomic<int> lossAlgorithmMode { kLossAlgorithmLegacy };
-    std::atomic<bool> strictBandCutEnabled { false };
+    std::atomic<float> lowCutHz { kLowCutHzMin };
+    std::atomic<float> highCutHz { kHighCutHzMax };
+    std::atomic<int> cutMode { kCutModeHardMask };
+    std::atomic<int> cutSlopeDbPerOct { kCutSlope12dB };
+    std::atomic<bool> cutDragActive { false };
 
     std::array<LossPreset, 12> lossPresets {};
+
     std::array<uint8_t, kLossBandCount> lossMask {};
     std::array<int, kLossBandCount> activeLossBands {};
     std::array<int, kLossBandCount> droppedLossBands {};
@@ -187,29 +280,38 @@ private:
     std::array<juce::IIRFilter, kLossBandCount> lossBandNotchL {};
     std::array<juce::IIRFilter, kLossBandCount> lossBandNotchR {};
 
+    static constexpr int kCutFilterMaxStages = 4;
+    std::array<juce::IIRFilter, kCutFilterMaxStages> cutHighPassL {};
+    std::array<juce::IIRFilter, kCutFilterMaxStages> cutHighPassR {};
+    std::array<juce::IIRFilter, kCutFilterMaxStages> cutLowPassL {};
+    std::array<juce::IIRFilter, kCutFilterMaxStages> cutLowPassR {};
+
     std::array<float, kLossBandCount> lossBandWet {};
     static constexpr float kLossMaskSmoothingTimeSeconds = 0.010f;
     float lossMaskSmoothCoeff = 1.0f;
 
     double currentSampleRateForLoss = 0.0;
+
     double currentLossNotchQForFilters = -1.0;
     int currentLossAlgorithmModeForFilters = -1;
+    float currentLowCutHzForMask = -1.0f;
+    float currentHighCutHzForMask = -1.0f;
+    int currentCutModeForMask = -1;
+    double currentSampleRateForCutFilter = 0.0;
+
+    float currentLowCutHzForCutFilter = -1.0f;
+    float currentHighCutHzForCutFilter = -1.0f;
+    int currentSlopeForCutFilter = -1;
+
+    juce::AudioBuffer<float> cutDryBuffer;
+    int cutCrossfadeSamplesRemaining = 0;
+    static constexpr int kCutCrossfadeSamples = 1024;
+
+    float lastLowCutHzForCrossfade = -1.0f;
+    float lastHighCutHzForCrossfade = -1.0f;
+    int lastSlopeForCrossfade = -1;
+
     double lossTimeSeconds = 0.0;
-
-    static constexpr int kStrictFftOrder = 11; // 2048
-    static constexpr int kStrictFftSize = 1 << kStrictFftOrder;
-    static constexpr int kStrictHopSize = kStrictFftSize / 2;
-
-    void resetStrictBandCutState();
-    void processStrictBandCut(juce::AudioBuffer<float>& buffer, int numChannels);
-
-    std::unique_ptr<juce::dsp::FFT> strictFft;
-    std::array<std::vector<float>, 2> strictInputFifo;
-    std::array<std::vector<float>, 2> strictOutputFifo;
-    std::array<std::vector<float>, 2> strictOutputOverlap;
-    std::array<std::vector<float>, 2> strictProcessTemp;
-    std::array<float, kStrictFftSize> strictWindow {};
-    bool strictBandCutLastEnabled = false;
 
     double nextLossRetriggerSeconds = 0.0;
     int lastLossPresetIndex = -1;

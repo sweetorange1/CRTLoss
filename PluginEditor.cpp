@@ -6,7 +6,7 @@
 
 namespace
 {
-    static constexpr auto kPluginUiVersionText = "v1.0.8";
+    static constexpr auto kPluginUiVersionText = "v1.1.6";
 }
 
 // --- BypassHitArea ---
@@ -1535,7 +1535,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             gg.drawText(channelText, channelOuter, juce::Justification::centred, true);
         }
 
-        // TV/ST-SAP 状态 OSD：左上角，独立显示/消失
+        // TV/ST-SAP/MUTE 状态 OSD：左上角，独立显示/消失
         const float modeT = owner.getModeOsdT();
         if (modeT > 0.0f)
         {
@@ -1551,6 +1551,10 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const juce::String cutText = (cutMode == LDSJvstAudioProcessor::kCutModeHardMask)
                                            ? "TV: HARD MASK"
                                            : ("TV: HPF/LPF " + juce::String(cutSlopeDb) + "dB/oct");
+
+            const juce::String muteText = owner.processor.isLossMaskInverted()
+                                            ? "MUTE: INVERT ON"
+                                            : "MUTE: INVERT OFF";
 
             const auto& modeCfg = presetParams.osd.mode;
 
@@ -1570,6 +1574,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             line1.removeFromTop(modeOuter.getHeight() * modeCfg.line1Split);
             auto line2 = modeOuter;
             line2.removeFromTop(modeOuter.getHeight() * modeCfg.line2Split);
+            auto line3 = modeOuter;
+            line3.removeFromTop(modeOuter.getHeight() * 0.86f);
 
             gg.setColour(juce::Colours::black.withAlpha(modeCfg.shadowAlpha * fade));
             gg.drawText(cutText,
@@ -1580,10 +1586,15 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                         line2.translated(modeCfg.shadowOffsetX, modeCfg.shadowOffsetY),
                         juce::Justification::centredTop,
                         true);
+            gg.drawText(muteText,
+                        line3.translated(modeCfg.shadowOffsetX, modeCfg.shadowOffsetY),
+                        juce::Justification::centredTop,
+                        true);
 
             gg.setColour(accent.withAlpha(modeCfg.textAlpha * fade));
             gg.drawText(cutText, line1, juce::Justification::centredTop, true);
             gg.drawText(algoText, line2, juce::Justification::centredTop, true);
+            gg.drawText(muteText, line3, juce::Justification::centredTop, true);
 
         }
 
@@ -2247,6 +2258,19 @@ void LDSJvstAudioProcessorEditor::toggleSleepFreezeFromUI()
         return;
 
     processor.toggleLossMaskFrozen();
+    oscilloscope.repaint();
+}
+
+void LDSJvstAudioProcessorEditor::toggleLossMaskInvertFromUI()
+{
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
+    processor.toggleLossMaskInverted();
+
+    modeOsdActive = true;
+    modeOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
     oscilloscope.repaint();
 }
 
@@ -2917,6 +2941,11 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
             else if (std::strcmp (b.name, "SLEEP") == 0)
             {
                 owner.toggleSleepFreezeFromUI();
+            }
+            // MUTE：反转频带丢失语义（保留/丢失互换）
+            else if (std::strcmp (b.name, "MUTE") == 0)
+            {
+                owner.toggleLossMaskInvertFromUI();
             }
             // RECALL：回到上一个进入的频道
             else if (std::strcmp (b.name, "RECALL") == 0)

@@ -425,6 +425,7 @@ void LDSJvstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     currentLowCutHzForMask = getLowCutHz();
     currentHighCutHzForMask = getHighCutHz();
     currentCutModeForMask = getCutMode();
+    currentLossMaskInvertedForMask = isLossMaskInverted() ? 1 : 0;
     currentSampleRateForCutFilter = 0.0;
 
     currentLowCutHzForCutFilter = -1.0f;
@@ -473,6 +474,7 @@ void LDSJvstAudioProcessor::releaseResources()
     lastLowCutHzForCrossfade = -1.0f;
     lastHighCutHzForCrossfade = -1.0f;
     lastSlopeForCrossfade = -1;
+    currentLossMaskInvertedForMask = isLossMaskInverted() ? 1 : 0;
 
     lossMask.fill(1);
 
@@ -519,10 +521,13 @@ void LDSJvstAudioProcessor::getLossMaskSnapshot(juce::Array<uint8_t>& dest)
 {
     dest.resize(kLossBandCount);
 
+    const bool inverted = isLossMaskInverted();
+    const uint8_t fallbackBit = inverted ? (uint8_t) 0 : (uint8_t) 1;
+
     if (isShuttingDown.load(std::memory_order_acquire))
     {
         for (int i = 0; i < kLossBandCount; ++i)
-            dest.set(i, 1);
+            dest.set(i, fallbackBit);
         return;
     }
 
@@ -530,12 +535,16 @@ void LDSJvstAudioProcessor::getLossMaskSnapshot(juce::Array<uint8_t>& dest)
     if (! sl.isLocked())
     {
         for (int i = 0; i < kLossBandCount; ++i)
-            dest.set(i, 1);
+            dest.set(i, fallbackBit);
         return;
     }
 
     for (int i = 0; i < kLossBandCount; ++i)
-        dest.set(i, lossMaskSnapshot[(size_t) i]);
+    {
+        const uint8_t raw = lossMaskSnapshot[(size_t) i];
+        const uint8_t effective = inverted ? (uint8_t) ((raw == 0) ? 1 : 0) : raw;
+        dest.set(i, effective);
+    }
 }
 
 
@@ -697,10 +706,12 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const float lowCutNow = getLowCutHz();
     const float highCutNow = getHighCutHz();
     const int cutModeNow = getCutMode();
+    const int lossMaskInvertedNowForMask = isLossMaskInverted() ? 1 : 0;
 
     const bool cutParamsChanged = (std::abs(lowCutNow - currentLowCutHzForMask) > 0.0001f) ||
                                   (std::abs(highCutNow - currentHighCutHzForMask) > 0.0001f) ||
-                                  (cutModeNow != currentCutModeForMask);
+                                  (cutModeNow != currentCutModeForMask) ||
+                                  (lossMaskInvertedNowForMask != currentLossMaskInvertedForMask);
 
     if (cutParamsChanged)
     {
@@ -709,7 +720,10 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         currentLowCutHzForMask = lowCutNow;
         currentHighCutHzForMask = highCutNow;
         currentCutModeForMask = cutModeNow;
+        currentLossMaskInvertedForMask = lossMaskInvertedNowForMask;
     }
+
+    const bool lossMaskInvertedNow = (lossMaskInvertedNowForMask != 0);
 
     auto* left  = (totalNumOutputChannels > 0) ? buffer.getWritePointer(0) : nullptr;
 
@@ -720,7 +734,9 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         // 先统一更新本 sample 的频段 wet（与声道无关），再分别处理左右声道
         for (int b = 0; b < kLossBandCount; ++b)
         {
-            const float targetWet = (lossMask[(size_t) b] == 0) ? 1.0f : 0.0f;
+            const bool droppedByMask = (lossMask[(size_t) b] == 0);
+            const bool effectiveDropped = lossMaskInvertedNow ? (! droppedByMask) : droppedByMask;
+            const float targetWet = effectiveDropped ? 1.0f : 0.0f;
             const float prevWet = lossBandWet[(size_t) b];
             const float wet = targetWet + (prevWet - targetWet) * lossMaskSmoothCoeff;
             lossBandWet[(size_t) b] = wet;
@@ -797,6 +813,7 @@ void LDSJvstAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     state.setProperty("limiterThreshold", (double) getLimiterThreshold(), nullptr);
     state.setProperty("lossNotchQ", (double) getLossNotchQ(), nullptr);
     state.setProperty("lossAlgorithmMode", getLossAlgorithmMode(), nullptr);
+    state.setProperty("lossMaskInverted", isLossMaskInverted() ? 1 : 0, nullptr);
     state.setProperty("lowCutHz", (double) getLowCutHz(), nullptr);
     state.setProperty("highCutHz", (double) getHighCutHz(), nullptr);
     state.setProperty("cutMode", getCutMode(), nullptr);
@@ -833,6 +850,7 @@ void LDSJvstAudioProcessor::setStateInformation(const void* data, int sizeInByte
     setLimiterThreshold((float) (double) state.getProperty("limiterThreshold", 1.0));
     setLossNotchQ((float) (double) state.getProperty("lossNotchQ", 11.0));
     setLossAlgorithmMode((int) state.getProperty("lossAlgorithmMode", kLossAlgorithmLegacy));
+    setLossMaskInverted(((int) state.getProperty("lossMaskInverted", 0)) != 0);
 
     const float restoredLowCutHz = (float) (double) state.getProperty("lowCutHz", (double) kLowCutHzMin);
     const float restoredHighCutHz = (float) (double) state.getProperty("highCutHz", (double) kHighCutHzMax);
@@ -843,6 +861,7 @@ void LDSJvstAudioProcessor::setStateInformation(const void* data, int sizeInByte
     currentLowCutHzForMask = getLowCutHz();
     currentHighCutHzForMask = getHighCutHz();
     currentCutModeForMask = getCutMode();
+    currentLossMaskInvertedForMask = isLossMaskInverted() ? 1 : 0;
     currentSampleRateForCutFilter = 0.0;
     currentLowCutHzForCutFilter = -1.0f;
     currentHighCutHzForCutFilter = -1.0f;

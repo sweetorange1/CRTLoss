@@ -116,6 +116,22 @@ public:
                                  : kLossAlgorithmLegacy);
     }
 
+    // 频带丢失掩码反转（MUTE）：true 时将“保留/丢失”含义翻转
+    bool isLossMaskInverted() const noexcept
+    {
+        return lossMaskInverted.load(std::memory_order_acquire);
+    }
+
+    void setLossMaskInverted(bool inverted) noexcept
+    {
+        lossMaskInverted.store(inverted, std::memory_order_release);
+    }
+
+    void toggleLossMaskInverted() noexcept
+    {
+        setLossMaskInverted(! isLossMaskInverted());
+    }
+
     // Sleep 冻结：true 时保持当前频带丢失掩码，不再进行下一次重随机/时序推进
     bool isLossMaskFrozen() const noexcept
     {
@@ -282,6 +298,7 @@ private:
     std::atomic<float> lossNotchQ { 6.0f };
     std::atomic<int> lossAlgorithmMode { kLossAlgorithmLegacy };
     std::atomic<bool> lossMaskFrozen { false };
+    std::atomic<bool> lossMaskInverted { false };
     std::atomic<float> lowCutHz { kLowCutHzMin };
 
     std::atomic<float> highCutHz { kHighCutHzMax };
@@ -316,6 +333,7 @@ private:
     float currentLowCutHzForMask = -1.0f;
     float currentHighCutHzForMask = -1.0f;
     int currentCutModeForMask = -1;
+    int currentLossMaskInvertedForMask = 0;
     double currentSampleRateForCutFilter = 0.0;
 
     float currentLowCutHzForCutFilter = -1.0f;

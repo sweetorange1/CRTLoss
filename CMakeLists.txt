@@ -18,7 +18,7 @@ add_subdirectory(grid_plugin)
 juce_add_plugin(
         LDSJvst
         PRODUCT_NAME "CRTloss"
-        VERSION 1.1.0
+        VERSION 1.1.6
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Ldsj
         PLUGIN_CODE Ldsj

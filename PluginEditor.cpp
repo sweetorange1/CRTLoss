@@ -208,6 +208,40 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
     auto b = getLocalBounds().toFloat();
 
     const int preset = owner.getSelectedPresetIndex();
+    const bool derivedChannel = (preset >= display_present::kPresetCount);
+    const int stylePreset = derivedChannel ? (1 + ((preset * 7 + 5) % (display_present::kPresetCount - 1))) : preset;
+
+    const auto presetParams = display_present::getPresetParamsForChannel(preset);
+
+    const auto getWaveBaseColour = [&]() -> juce::Colour
+    {
+        if (derivedChannel)
+            return juce::Colour::fromHSV(presetParams.waveHue,
+                                          juce::jlimit(0.45f, 1.0f, presetParams.waveSat),
+                                          juce::jlimit(0.55f, 1.0f, presetParams.waveVal),
+                                          1.0f);
+
+        switch (preset)
+        {
+            case 0:  return juce::Colour::fromRGB(0x39, 0xFF, 0x14);
+            case 1:  return juce::Colour::fromRGB(0x3A, 0xE6, 0xFF);
+            case 2:  return juce::Colour::fromRGB(0xFF, 0xB0, 0x30);
+            case 4:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
+            case 5:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
+            case 6:  return juce::Colour::fromRGB(0x7C, 0xFF, 0x6B);
+            case 7:  return juce::Colour::fromRGB(0xFF, 0x4D, 0xFF);
+            case 8:  return juce::Colour::fromRGB(0xFF, 0x66, 0x33);
+            case 9:  return juce::Colour::fromRGB(0xB7, 0x4D, 0xFF);
+            case 10: return juce::Colours::white;
+            case 11: return juce::Colour::fromRGB(0x00, 0xFF, 0x66);
+            case 3:
+            default: return juce::Colours::white;
+        }
+    };
+
+    const auto waveBaseColour = getWaveBaseColour();
+    const auto waveGlowColour = waveBaseColour.withMultipliedBrightness(1.06f);
+    const auto osdAccentColour = waveBaseColour.withMultipliedSaturation(0.92f).withMultipliedBrightness(0.96f);
     const float corner = 6.0f;
 
     // 先裁剪到圆角矩形，避免各种背景绘制溢出
@@ -257,7 +291,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
     // 要点：每个预设的背景“算法差异”尽量大，同时所有可调参数集中在 display_present.h
     auto drawBackground = [&](juce::Graphics& gg)
     {
-        const auto& presetParams = display_present::getPresetParams(preset);
+        const auto presetParams = display_present::getPresetParamsForChannel(preset);
         const auto& bg = presetParams.bg;
 
         const float seconds = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
@@ -734,7 +768,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         drawBackground(gg);
 
         // 预设 0：像素电视雪花（这块仍然用原来的逐像素生成方式）
-        if (preset == 0 && ! bypassActive)
+        if (stylePreset == 0 && ! bypassActive)
+
         {
             const int downsample = 2;
             const int lw = juce::jmax(2, (int) (sb.getWidth()  / (float) downsample));
@@ -776,7 +811,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             gg.setColour(juce::Colours::black.withAlpha(0.24f));
             gg.fillRect(sb);
 
-            const auto neonGreen = juce::Colour::fromRGB(0x39, 0xFF, 0x14);
+            const auto neonGreen = waveGlowColour;
 
             const float pixelStep = 3.0f;
             auto qx = [pixelStep, x0 = sb.getX()](float x) { return x0 + std::round((x - x0) / pixelStep) * pixelStep; };
@@ -800,12 +835,12 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         }
         else if (! bypassActive)
         {
-            switch (preset)
+            switch (stylePreset)
             {
                 case 1:
                 {
                     // 网格由背景算法（带玻璃弧形扭曲）负责，这里只画波形，避免“正方形格子 + 扭曲格子”叠在一起
-                    const auto c = juce::Colour::fromRGB(0x3A, 0xE6, 0xFF);
+                    const auto c = waveGlowColour;
 
                     gg.setColour(c.withAlpha(0.18f));
                     gg.strokePath(waveform, juce::PathStrokeType(6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
@@ -818,7 +853,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 case 2:
                 {
                     drawScanlines(gg, juce::Colours::black.withAlpha(0.14f), 2);
-                    const auto amber = juce::Colour::fromRGB(0xFF, 0xB0, 0x30);
+                    const auto amber = waveGlowColour;
 
                     juce::Path trail = waveform;
                     trail.applyTransform(juce::AffineTransform::translation(0.0f, 1.0f));
@@ -857,7 +892,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                         preset3Trail.pop_front();
 
                     // 先画旧的，新的覆盖在上面
-                    const auto baseTrail = juce::Colour::fromRGB(0x88, 0xFF, 0xFF);
+                    const auto baseTrail = waveGlowColour;
+
                     for (const auto& it : preset3Trail)
                     {
                         const float age = (float) (nowSec - it.tSec);
@@ -900,8 +936,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 case 4:
                 {
                     // 预设 4：全新风格（与雷达背景协调的“霓虹向量示波”）
-                    const auto neonA = juce::Colour::fromRGB(0xA0, 0x50, 0xFF);
-                    const auto neonB = juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
+                    const auto neonA = waveGlowColour.withMultipliedBrightness(0.86f);
+                    const auto neonB = waveGlowColour;
 
                     juce::Path glow = waveform;
                     glow.applyTransform(juce::AffineTransform::translation(0.0f, 0.6f));
@@ -930,7 +966,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 case 5:
                 {
                     // 冷色磷光：更像 CRT 的“发光磷粉”，让波形清晰但有柔和辉光
-                    const auto c = juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
+                    const auto c = waveGlowColour;
 
                     // 压暗底阴影（让亮线更立体）
                     juce::Path shadow = waveform;
@@ -955,7 +991,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 case 6:
                 {
                     drawGrid(gg, juce::Colours::white.withAlpha(0.03f), 40);
-                    auto c = juce::Colour::fromRGB(0x7C, 0xFF, 0x6B);
+                    auto c = waveGlowColour;
 
                     juce::Path mirror = waveform;
                     mirror.applyTransform(juce::AffineTransform::scale(1.0f, -1.0f, 0.0f, midY));
@@ -970,7 +1006,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 }
                 case 7:
                 {
-                    const auto mag = juce::Colour::fromRGB(0xFF, 0x4D, 0xFF);
+                    const auto mag = waveGlowColour;
+
                     const int step = juce::jmax(1, n / 180);
                     for (int i = 0; i < n; i += step)
                     {
@@ -995,7 +1032,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     constexpr int maxItems = 40;
 
                     juce::Random rng ((int) juce::Time::getMillisecondCounter());
-                    const auto c = juce::Colour::fromRGB(0xFF, 0x66, 0x33);
+                    const auto c = waveGlowColour;
 
                     // 当前帧：保留原来的“抖动”风格，但改成 Path 以便写入拖影队列
                     juce::Path jitterPath;
@@ -1044,7 +1081,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
 
                 case 9:
                 {
-                    const auto purp = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF);
+                    const auto purp = waveGlowColour;
+
                     juce::Path shadow = waveform;
                     shadow.applyTransform(juce::AffineTransform::translation(2.0f, 2.0f));
 
@@ -1112,7 +1150,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     gg.setColour(juce::Colours::white.withAlpha(0.08f));
                     gg.drawLine(sb.getX(), midY, sb.getRight(), midY, 1.0f);
 
-                    gg.setColour(juce::Colours::lime.withAlpha(0.9f));
+                    gg.setColour(waveBaseColour.withAlpha(0.9f));
+
                     gg.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
                     break;
                 }
@@ -1120,7 +1159,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         }
 
         // 中心线（大多数预设都更像示波器）
-        if (! bypassActive && preset != 10)
+        if (! bypassActive && stylePreset != 10)
+
         {
             gg.setColour(juce::Colours::white.withAlpha(0.06f));
             gg.drawLine(sb.getX(), midY, sb.getRight(), midY, 1.0f);
@@ -1132,13 +1172,13 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const int ms = (int) juce::Time::getMillisecondCounter();
             const float seconds = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
 
-            const int burstPeriod = 150 + preset * 17;
-            const int burstMod = 7 + (preset % 5);
-            const bool burst = (((ms / burstPeriod) % burstMod) == (preset % burstMod));
+            const int burstPeriod = 150 + stylePreset * 17;
+            const int burstMod = 7 + (stylePreset % 5);
+            const bool burst = (((ms / burstPeriod) % burstMod) == (stylePreset % burstMod));
 
-            float amount = juce::jlimit(0.18f, 1.0f, 0.32f + 0.055f * (float) preset + (burst ? 0.45f : 0.0f));
+            float amount = juce::jlimit(0.18f, 1.0f, 0.32f + 0.055f * (float) stylePreset + (burst ? 0.45f : 0.0f));
 
-            juce::Random rng ((int) (ms ^ (preset * 0x9E3779B9)));
+            juce::Random rng ((int) (ms ^ (preset * 0x9E3779B9) ^ (stylePreset * 0x45D9F3B)));
 
             auto rollBar = [&](float speed, juce::Colour c, float alpha)
             {
@@ -1229,9 +1269,10 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 }
             };
 
-            switch (preset)
+            switch (stylePreset)
             {
                 case 1:
+
                 {
                     rollBar(0.30f, juce::Colour::fromRGB(0x9A, 0xE6, 0xFF), 0.12f * amount);
                     tearStrips(2 + (burst ? 6 : 2), 40.0f + 120.0f * amount, true);
@@ -1462,47 +1503,35 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             gg.fillRect(sb);
         }
 
-        // OSD 统一色调
-        const auto& presetParams = display_present::getPresetParams(preset);
-
-        juce::Colour accent;
-        switch (presetParams.bg.kind)
-        {
-            case display_present::BackgroundKind::digitalGrid:         accent = juce::Colour::fromRGB(0x9A, 0xE6, 0xFF); break;
-            case display_present::BackgroundKind::amberVignette:       accent = juce::Colour::fromRGB(0xFF, 0xB0, 0x00); break;
-            case display_present::BackgroundKind::radarSweep:          accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
-            case display_present::BackgroundKind::phosphorBloom:       accent = juce::Colour::fromRGB(0x00, 0xFF, 0xC6); break;
-            case display_present::BackgroundKind::rainbowInterference: accent = juce::Colour::fromHSV(std::fmod((float) (juce::Time::getMillisecondCounterHiRes() * 0.001 * 0.18), 1.0f), 0.95f, 1.0f, 1.0f); break;
-            case display_present::BackgroundKind::dotMask:             accent = juce::Colour::fromRGB(0xFF, 0x4D, 0xB7); break;
-            case display_present::BackgroundKind::oceanBlobs:          accent = juce::Colour::fromRGB(0x4D, 0xB7, 0xFF); break;
-            case display_present::BackgroundKind::mirrorCross:         accent = juce::Colour::fromRGB(0x00, 0xFF, 0x66); break;
-            case display_present::BackgroundKind::barcode:             accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
-            case display_present::BackgroundKind::glitchStatic:        accent = juce::Colours::white; break;
-            case display_present::BackgroundKind::neonStarfield:       accent = juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); break;
-            case display_present::BackgroundKind::minimalVignette:     accent = juce::Colours::white; break;
-            case display_present::BackgroundKind::greenTerminal:       accent = juce::Colour::fromRGB(0x00, 0xFF, 0x66); break;
-            case display_present::BackgroundKind::legacySolid:
-            default:                                                  accent = juce::Colours::white; break;
-        }
+        // OSD 统一色调：始终与波形主色系一致
+        const auto& presetParams = display_present::getPresetParamsForChannel(preset);
+        const auto accent = osdAccentColour;
 
         // 频道 OSD：右上角，独立显示/消失（仅显示4位频道号）
         const juce::String channelText = owner.getChannelOsdText();
         if (channelText.isNotEmpty())
         {
-            const float cox = sb.getWidth()  * (468.0f / 643.0f);
-            const float coy = sb.getHeight() * (68.0f  / 529.0f);
-            const float cow = sb.getWidth()  * (152.0f / 643.0f);
-            const float coh = sb.getHeight() * (44.0f  / 529.0f);
+            const auto& channelCfg = presetParams.osd.channel;
+
+            const float cox = sb.getWidth()  * channelCfg.rect.x;
+            const float coy = sb.getHeight() * channelCfg.rect.y;
+            const float cow = sb.getWidth()  * channelCfg.rect.w;
+            const float coh = sb.getHeight() * channelCfg.rect.h;
 
             const auto channelOuter = juce::Rectangle<float>(sb.getX() + cox, sb.getY() + coy, cow, coh);
 
-            const float channelFontSize = juce::jlimit(31.0f, 52.0f, channelOuter.getHeight() * 0.78f);
+            const float channelFontSize = juce::jlimit(channelCfg.fontMin,
+                                                       channelCfg.fontMax,
+                                                       channelOuter.getHeight() * channelCfg.fontHeightScale);
             gg.setFont(juce::Font(channelFontSize, juce::Font::bold));
 
-            gg.setColour(juce::Colours::black.withAlpha(0.72f));
-            gg.drawText(channelText, channelOuter.translated(1.0f, 1.0f), juce::Justification::centred, true);
+            gg.setColour(juce::Colours::black.withAlpha(channelCfg.shadowAlpha));
+            gg.drawText(channelText,
+                        channelOuter.translated(channelCfg.shadowOffsetX, channelCfg.shadowOffsetY),
+                        juce::Justification::centred,
+                        true);
 
-            gg.setColour(accent.withAlpha(0.98f));
+            gg.setColour(accent.withAlpha(channelCfg.textAlpha));
             gg.drawText(channelText, channelOuter, juce::Justification::centred, true);
         }
 
@@ -1523,28 +1552,39 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                                            ? "TV: HARD MASK"
                                            : ("TV: HPF/LPF " + juce::String(cutSlopeDb) + "dB/oct");
 
-            const float mox = sb.getWidth()  * (20.0f  / 643.0f);
-            const float moy = sb.getHeight() * (68.0f  / 529.0f);
-            const float mow = sb.getWidth()  * (256.0f / 643.0f);
-            const float moh = sb.getHeight() * (72.0f  / 529.0f);
+            const auto& modeCfg = presetParams.osd.mode;
+
+            const float mox = sb.getWidth()  * modeCfg.rect.x;
+            const float moy = sb.getHeight() * modeCfg.rect.y;
+            const float mow = sb.getWidth()  * modeCfg.rect.w;
+            const float moh = sb.getHeight() * modeCfg.rect.h;
 
             const auto modeOuter = juce::Rectangle<float>(sb.getX() + mox, sb.getY() + moy, mow, moh);
 
-            const float lineFontSize = juce::jlimit(24.0f, 34.0f, modeOuter.getHeight() * 0.33f);
+            const float lineFontSize = juce::jlimit(modeCfg.fontMin,
+                                                    modeCfg.fontMax,
+                                                    modeOuter.getHeight() * modeCfg.fontHeightScale);
             gg.setFont(juce::Font(lineFontSize, juce::Font::plain));
 
             auto line1 = modeOuter;
-            line1.removeFromTop(modeOuter.getHeight() * 0.52f);
+            line1.removeFromTop(modeOuter.getHeight() * modeCfg.line1Split);
             auto line2 = modeOuter;
-            line2.removeFromTop(modeOuter.getHeight() * 0.24f);
+            line2.removeFromTop(modeOuter.getHeight() * modeCfg.line2Split);
 
-            gg.setColour(juce::Colours::black.withAlpha(0.70f * fade));
-            gg.drawText(cutText, line1.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
-            gg.drawText(algoText, line2.translated(1.0f, 1.0f), juce::Justification::centredTop, true);
+            gg.setColour(juce::Colours::black.withAlpha(modeCfg.shadowAlpha * fade));
+            gg.drawText(cutText,
+                        line1.translated(modeCfg.shadowOffsetX, modeCfg.shadowOffsetY),
+                        juce::Justification::centredTop,
+                        true);
+            gg.drawText(algoText,
+                        line2.translated(modeCfg.shadowOffsetX, modeCfg.shadowOffsetY),
+                        juce::Justification::centredTop,
+                        true);
 
-            gg.setColour(accent.withAlpha(0.96f * fade));
+            gg.setColour(accent.withAlpha(modeCfg.textAlpha * fade));
             gg.drawText(cutText, line1, juce::Justification::centredTop, true);
             gg.drawText(algoText, line2, juce::Justification::centredTop, true);
+
         }
 
         // 音量 OSD：屏幕下方，独立显示/消失
@@ -1611,10 +1651,10 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
     // ============================================================
 
     const int ms = (int) juce::Time::getMillisecondCounter();
-    juce::Random rng ((int) (ms ^ (preset * 0x6A09E667)));
+    juce::Random rng ((int) (ms ^ (preset * 0x6A09E667) ^ (stylePreset * 0x7F4A7C15)));
 
-    const auto& presetParams = display_present::getPresetParams(preset);
     const auto& warpParams = presetParams.warp;
+
 
     float maxOffsetPx = warpParams.maxOffsetPx;
     int windowRadius = warpParams.windowRadius;
@@ -1636,8 +1676,9 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
     {
         // 让噪声在垂直方向上也有一点“块状相关性”，避免每行完全独立显得太电子
         const int block = juce::jlimit(1, 14,
-                                       warpParams.blockBase + (preset % warpParams.blockPresetMod)
+                                       warpParams.blockBase + (stylePreset % warpParams.blockPresetMod)
                                        + windowRadius / 3);
+
         for (int y = 0; y < H;)
         {
             const float v = (rng.nextFloat() - 0.5f) * 2.0f; // [-1, +1]
@@ -1669,7 +1710,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         // 转换为像素偏移：加入一个轻微的正弦漂移，让“同步噪声”更像模拟信号
         const float seconds = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
         const float drift = warpParams.driftAmp
-                          * std::sin(seconds * (warpParams.driftFreqBase + warpParams.driftFreqPerPreset * (float) preset)
+                          * std::sin(seconds * (warpParams.driftFreqBase + warpParams.driftFreqPerPreset * (float) stylePreset)
+
                                     + (float) y * warpParams.driftYMul);
         scanlineOffsetPx[(size_t) y] = (scanlineNoiseSmoothed[(size_t) y] + drift) * maxOffsetPx + globalKickDx;
 
@@ -1757,7 +1799,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         const float yTop = midY - th * scaleY;
         const float yBot = midY + th * scaleY;
 
-        const auto& presetParams = display_present::getPresetParams(preset);
+        const auto& presetParams = display_present::getPresetParamsForChannel(preset);
+
         const float accent = presetParams.bg.accentAlpha;
 
         // 强度：比波形线明显更弱，但在不同预设亮度下保持可见
@@ -1765,25 +1808,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         const float glowA   = juce::jlimit(0.04f, 0.20f, mainA * 0.38f);
         const float shadowA = juce::jlimit(0.05f, 0.25f, mainA * 0.55f);
 
-        auto getWaveBaseColour = [&]() -> juce::Colour
-        {
-            switch (preset)
-            {
-                case 0:  return juce::Colour::fromRGB(0x39, 0xFF, 0x14); // 像素绿
-                case 1:  return juce::Colour::fromRGB(0x3A, 0xE6, 0xFF); // 冷色青
-                case 2:  return juce::Colour::fromRGB(0xFF, 0xB0, 0x30); // 琥珀
-                case 4:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5); // neonB
-                case 5:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5); // 磷光青
-                case 6:  return juce::Colour::fromRGB(0x7C, 0xFF, 0x6B); // 绿
-                case 7:  return juce::Colour::fromRGB(0xFF, 0x4D, 0xFF); // 品红
-                case 8:  return juce::Colour::fromRGB(0xFF, 0x66, 0x33); // 橙
-                case 9:  return juce::Colour::fromRGB(0xB7, 0x4D, 0xFF); // 紫
-                case 10: return juce::Colours::white;
-                case 11: return juce::Colour::fromRGB(0x00, 0xFF, 0x66);
-                case 3:  // 彩虹：下面用渐变来画
-                default: return juce::Colours::white;
-            }
-        };
+
 
         auto drawLineWithStyle = [&](float y, bool rainbow)
         {
@@ -1808,7 +1833,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 return;
             }
 
-            const auto base = getWaveBaseColour();
+            const auto base = waveBaseColour;
 
             // 外辉光（弱）
             g.setColour(base.withAlpha(glowA));
@@ -1819,7 +1844,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             g.drawLine(b.getX(), y, b.getRight(), y, 2.0f);
         };
 
-        const bool rainbow = (preset == 3);
+        const bool rainbow = (stylePreset == 3);
+
         drawLineWithStyle(yTop, rainbow);
         drawLineWithStyle(yBot, rainbow);
     }
@@ -1849,30 +1875,10 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const float x0 = b.getX() + (b.getWidth() - (cellW * (float) bands + gap * (float) (bands - 1))) * 0.5f;
             const float y0 = b.getBottom() - cellH - juce::jmax(2.0f, b.getHeight() * 0.018f);
 
-            const auto& presetParams = display_present::getPresetParams(preset);
             const float accent = presetParams.bg.accentAlpha;
 
-            auto getWaveBaseColour = [&]() -> juce::Colour
-            {
-                switch (preset)
-                {
-                    case 0:  return juce::Colour::fromRGB(0x39, 0xFF, 0x14);
-                    case 1:  return juce::Colour::fromRGB(0x3A, 0xE6, 0xFF);
-                    case 2:  return juce::Colour::fromRGB(0xFF, 0xB0, 0x30);
-                    case 4:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
-                    case 5:  return juce::Colour::fromRGB(0x5A, 0xFF, 0xE5);
-                    case 6:  return juce::Colour::fromRGB(0x7C, 0xFF, 0x6B);
-                    case 7:  return juce::Colour::fromRGB(0xFF, 0x4D, 0xFF);
-                    case 8:  return juce::Colour::fromRGB(0xFF, 0x66, 0x33);
-                    case 9:  return juce::Colour::fromRGB(0xB7, 0x4D, 0xFF);
-                    case 10: return juce::Colours::white;
-                    case 11: return juce::Colour::fromRGB(0x00, 0xFF, 0x66);
-                    case 3:
-                    default: return juce::Colours::white;
-                }
-            };
+            const auto base = waveBaseColour;
 
-            const auto base = getWaveBaseColour();
             const auto litColour = base.withAlpha(juce::jlimit(0.65f, 0.98f, 0.68f + 1.2f * accent));
             const auto dimColour = juce::Colours::black.withAlpha(juce::jlimit(0.52f, 0.84f, 0.72f - 0.4f * accent));
             const auto borderColour = base.withAlpha(juce::jlimit(0.10f, 0.38f, 0.12f + 0.8f * accent));
@@ -1913,7 +1919,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 const bool passByMask = lossMaskSnapshotUI[i] != 0;
                 const bool pass = (! inCutZone) && passByMask;
 
-                if (preset == 3 && pass)
+                if (stylePreset == 3 && pass)
+
                 {
                     const float t = (float) i / (float) juce::jmax(1, bands - 1);
                     g.setColour(juce::Colour::fromHSV(t, 0.88f, 1.0f, litColour.getFloatAlpha()));
@@ -1931,7 +1938,8 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const float triW = juce::jmax(9.0f, cellW * 2.3f);
             const float triH = juce::jmax(6.0f, cellH * 2.2f);
 
-            const bool rainbowHandle = (preset == 3);
+            const bool rainbowHandle = (stylePreset == 3);
+
             const float rainbowTimePhase = std::fmod((float) (juce::Time::getMillisecondCounterHiRes() * 0.001 * 0.22), 1.0f);
 
             auto drawRainbowLine = [&](float x1, float y1, float x2, float y2, float width, float alpha)
@@ -2073,16 +2081,19 @@ LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& 
         refreshTempNotchQInputText();
     }
 
-    presetLights.ensureStorageAllocated(presetCount);
+    presetLights.ensureStorageAllocated(indicatorPresetCount);
 
-    for (int i = 0; i < presetCount; ++i)
+    for (int i = 0; i < indicatorPresetCount; ++i)
     {
         auto* light = presetLights.add(new IndicatorLight(*this, i));
         addAndMakeVisible(light);
     }
 
-    // 从宿主恢复的 state 里读取预设选择（如果没有则为默认 0）
-    selectedPresetIndex = juce::jlimit(0, presetCount - 1, processor.getDisplayPresetIndex());
+    // 从宿主恢复的 state 里读取频道（如果没有则为默认 0）
+    selectedChannelId = juce::jlimit(channelIdMin, channelIdMax, processor.getDisplayPresetIndex());
+    previousChannelId = selectedChannelId;
+    selectedPresetIndex = selectedChannelId % indicatorPresetCount;
+    previousPresetIndex = selectedPresetIndex;
 
     if (resizableCorner != nullptr)
         resizableCorner->toFront(false);
@@ -2239,6 +2250,20 @@ void LDSJvstAudioProcessorEditor::toggleSleepFreezeFromUI()
     oscilloscope.repaint();
 }
 
+void LDSJvstAudioProcessorEditor::recallPreviousChannelFromUI()
+{
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
+    const int cur = selectedChannelId;
+    const int prev = juce::jlimit(channelIdMin, channelIdMax, previousChannelId);
+
+    if (prev == cur)
+        return;
+
+    setSelectedPresetIndex(prev);
+}
+
 
 float LDSJvstAudioProcessorEditor::getVolumeOsdT() noexcept
 
@@ -2318,14 +2343,15 @@ void LDSJvstAudioProcessorEditor::triggerChannelJumpNow()
     pendingChannelDigits.clear();
 
     const int channelIndex = submittedChannel.getIntValue();
-    if (channelIndex >= 0 && channelIndex < presetCount)
+    if (channelIndex >= channelIdMin && channelIndex <= channelIdMax)
     {
         setSelectedPresetIndex(channelIndex);
         return;
     }
 
-    // 超出当前可用频道范围时，仅显示输入结果，不切换预设
+    // 超出可用频道范围时，仅显示输入结果，不切换频道
     channelDisplayText = submittedChannel;
+
     channelOsdCurrentDurationSeconds = channelInputOsdDurationSeconds;
     channelOsdActive = true;
     channelOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
@@ -2394,29 +2420,45 @@ void LDSJvstAudioProcessorEditor::setSelectedPresetIndex (int newIndex)
     if (editorShuttingDown || processor.isShuttingDownNow())
         return;
 
-    newIndex = juce::jlimit(0, presetCount - 1, newIndex);
+    const int newChannelId = juce::jlimit(channelIdMin, channelIdMax, newIndex);
+    const int newVisualIndex = newChannelId % indicatorPresetCount;
 
-    // 预设 0-11 视为频道 0-11：点击/切换时都显示频道，3 秒后消失
+    // 频道号显示：点击/切换时都显示，3 秒后消失
     pendingChannelDigits.clear();
-    channelDisplayText = juce::String(newIndex);
+    channelDisplayText = juce::String(newChannelId);
     channelOsdCurrentDurationSeconds = presetChannelOsdDurationSeconds;
     channelOsdActive = true;
     channelOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
-    if (selectedPresetIndex == newIndex)
+    if (selectedChannelId == newChannelId)
     {
         oscilloscope.repaint();
         return;
     }
 
-    // 启动预设切换动画
+    // 启动预设切换动画（灯号维度 0..11）
     presetTransitionActive = true;
     presetTransitionFrom = selectedPresetIndex;
-    presetTransitionTo = newIndex;
+    presetTransitionTo = newVisualIndex;
     presetTransitionStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
-    selectedPresetIndex = newIndex;
-    processor.setDisplayPresetIndex(newIndex);
+    previousChannelId = selectedChannelId;
+    selectedChannelId = newChannelId;
+
+    previousPresetIndex = selectedPresetIndex;
+    selectedPresetIndex = newVisualIndex;
+
+    processor.setDisplayPresetIndex(newChannelId);
+
+    // 频道参数统一由 display_present.h 驱动：0..11 固定预设，12..9999 衍生预设
+    const auto presetCfg = display_present::getPresetParamsForChannel(newChannelId);
+    if (presetCfg.cutPreset.applyOnChannelEnter)
+    {
+        processor.setCutMode(presetCfg.cutPreset.cutMode);
+        processor.setCutSlopeDbPerOct(presetCfg.cutPreset.cutSlopeDbPerOct);
+        processor.setLowCutHz(presetCfg.cutPreset.lowCutHz);
+        processor.setHighCutHz(presetCfg.cutPreset.highCutHz);
+    }
 
     for (auto* light : presetLights)
         if (light != nullptr)
@@ -2846,20 +2888,21 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
             {
                 owner.toggleBypassFromUI();
             }
-            // 频道增加：预设切换到下一个（边界循环）
+            // 频道增加：频道号 +1（边界循环 0..9999）
             else if (std::strcmp (b.name, "频道增加") == 0)
             {
                 const int cur = owner.getSelectedPresetIndex();
-                const int next = (cur + 1) % presetCount;
+                const int next = (cur >= channelIdMax) ? channelIdMin : (cur + 1);
                 owner.setSelectedPresetIndex(next);
             }
-            // 频道减少：预设切换到上一个（边界循环）
+            // 频道减少：频道号 -1（边界循环 0..9999）
             else if (std::strcmp (b.name, "频道减少") == 0)
             {
                 const int cur = owner.getSelectedPresetIndex();
-                const int prev = (cur + presetCount - 1) % presetCount;
+                const int prev = (cur <= channelIdMin) ? channelIdMax : (cur - 1);
                 owner.setSelectedPresetIndex(prev);
             }
+
             // TV：切换高低切算法与斜率（HardMask <-> HPF/LPF 12/24/48）
             else if (std::strcmp (b.name, "TV") == 0)
             {
@@ -2874,6 +2917,11 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
             else if (std::strcmp (b.name, "SLEEP") == 0)
             {
                 owner.toggleSleepFreezeFromUI();
+            }
+            // RECALL：回到上一个进入的频道
+            else if (std::strcmp (b.name, "RECALL") == 0)
+            {
+                owner.recallPreviousChannelFromUI();
             }
             // 数字键：输入频道（最多4位；3秒不输入自动跳转）
             else

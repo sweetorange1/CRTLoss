@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "display_present.h"
 #include <array>
 #include <atomic>
 #include <vector>
@@ -44,12 +45,15 @@ public:
 
     static constexpr int kLossBandCountForUI = 100;
 
-    // 显示波形的“预设”选择（由界面设置，宿主保存工程时需要持久化）
+    // 显示频道（由界面设置，宿主保存工程时需要持久化）
+    // 0..11 使用固定预设；12..9999 使用由频道ID确定的衍生预设
+    static constexpr int kDisplayChannelMin = 0;
+    static constexpr int kDisplayChannelMax = display_present::kDerivedChannelMax;
+
     int getDisplayPresetIndex() const noexcept { return displayPresetIndex.load(std::memory_order_relaxed); }
     void setDisplayPresetIndex(int newIndex) noexcept
     {
-        // 目前预设数量固定为 12（0..11）
-        displayPresetIndex.store(juce::jlimit(0, 11, newIndex), std::memory_order_relaxed);
+        displayPresetIndex.store(juce::jlimit(kDisplayChannelMin, kDisplayChannelMax, newIndex), std::memory_order_relaxed);
     }
 
     // 前置增益（dB）：默认 +10dB，范围 -5..+24
@@ -235,14 +239,8 @@ private:
     static constexpr int oscilloscopeBufferSize = 2048;
     static constexpr int kLossBandCount = 100;
 
-    struct LossPreset
-    {
-        std::array<float, kLossBandCount> probabilities {};
-        double retriggerSeconds = 0.50;
-    };
-
     void pushSamplesToOscilloscope(const float* samples, int numSamples);
-    void initLossPresets();
+
     void ensureLossFilters(double sampleRate);
     void retriggerLossMask(double nowSeconds);
     void applyCutMaskToLossMask() noexcept;
@@ -265,8 +263,12 @@ private:
     double getSequencedRetriggerSeconds(int presetIndex, double bpm) const noexcept;
     double getRandomPresetRetriggerSeconds(double bpm) const noexcept;
 
+    // 保护音频线程中的非原子缓存状态（如 current* / last* / lossMask 等）与状态恢复/释放资源阶段的并发访问
+    juce::SpinLock processingStateLock;
+
     juce::SpinLock oscilloscopeLock;
     std::array<float, oscilloscopeBufferSize> oscilloscopeBuffer {};
+
     int oscilloscopeWritePos = 0;
 
     juce::SpinLock lossMaskSnapshotLock;
@@ -287,9 +289,8 @@ private:
     std::atomic<int> cutSlopeDbPerOct { kCutSlope12dB };
     std::atomic<bool> cutDragActive { false };
 
-    std::array<LossPreset, 12> lossPresets {};
-
     std::array<uint8_t, kLossBandCount> lossMask {};
+
     std::array<int, kLossBandCount> activeLossBands {};
     std::array<int, kLossBandCount> droppedLossBands {};
     int activeLossBandCount = 0;

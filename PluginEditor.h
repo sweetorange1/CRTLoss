@@ -28,7 +28,10 @@ private:
 
     static constexpr float editorAspectRatio = (float) baseEditorWidth / (float) baseEditorHeight;
 
-    static constexpr int presetCount = 12;
+    static constexpr int indicatorPresetCount = 12;
+    static constexpr int channelIdMin = 0;
+    static constexpr int channelIdMax = display_present::kDerivedChannelMax;
+
     static constexpr int presetLightX = 829;
     static constexpr int presetLightY = 157;
     static constexpr int presetLightSize = 17;
@@ -70,8 +73,12 @@ private:
     juce::Image remoteImage;
 
     int selectedPresetIndex = 0;
+    int previousPresetIndex = 0;
+    int selectedChannelId = 0;
+    int previousChannelId = 0;
+
     void setSelectedPresetIndex (int newIndex);
-    int getSelectedPresetIndex() const noexcept { return selectedPresetIndex; }
+    int getSelectedPresetIndex() const noexcept { return selectedChannelId; }
 
     class IndicatorLight final : public juce::Component
     {
@@ -95,7 +102,10 @@ private:
                 return;
             }
 
-            const bool isOn = (owner.getSelectedPresetIndex() == index);
+            const int currentChannel = owner.getSelectedPresetIndex();
+            const bool isOn = (currentChannel >= 0
+                               && currentChannel < indicatorPresetCount
+                               && currentChannel == index);
 
             g.setColour(juce::Colours::black.withAlpha(0.55f));
             g.fillEllipse(b);
@@ -327,6 +337,7 @@ private:
     void toggleLossAlgorithmFromUI(); // 遥控器 ST/SAP：在两种频带丢失算法间切换
     void cycleCutModeOrSlopeFromTV(); // 遥控器 TV：硬裁剪 <-> HPF/LPF，且在HPF/LPF内轮换12/24/48dB
     void toggleSleepFreezeFromUI();   // 遥控器 SLEEP：冻结/恢复频带丢失变化
+    void recallPreviousChannelFromUI(); // 遥控器 RECALL：回到上一个频道
     float getVolumeOsdT() noexcept; // 0..1（时间进度），0 表示不显示
 
     float getModeOsdT() noexcept;   // 0..1（TV/ST-SAP 状态时间进度），0 表示不显示
@@ -352,7 +363,8 @@ private:
     double modeOsdStartSeconds = 0.0;
     static constexpr double modeOsdDurationSeconds = 3.0;
 
-    // 遥控器频道输入（仅屏幕显示，不关联实际音频/预设逻辑）
+    // 遥控器频道输入（提交后会切换到对应频道：0..11 固定预设，12..9999 衍生预设）
+
     juce::String pendingChannelDigits;
     double pendingChannelLastInputSeconds = 0.0;
     bool channelOsdActive = false;

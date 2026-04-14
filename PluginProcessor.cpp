@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "display_present.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -15,8 +16,8 @@ LDSJvstAudioProcessor::LDSJvstAudioProcessor()
 #endif
     )
 {
-    initLossPresets();
     lossMask.fill(1);
+
     lossMaskSnapshot.fill(1);
     lossBandWet.fill(1.0f);
     activeLossBandCount = 0;
@@ -32,121 +33,7 @@ LDSJvstAudioProcessor::~LDSJvstAudioProcessor()
     nextLossRetriggerSeconds = std::numeric_limits<double>::infinity();
 }
 
-void LDSJvstAudioProcessor::initLossPresets()
-{
-    for (auto& preset : lossPresets)
-    {
-        preset.probabilities.fill(0.50f);
-        preset.retriggerSeconds = 0.50;
-    }
 
-    // 0: 全频段均匀 50%，0.5s 重触发（你描述的示例）
-    lossPresets[0].probabilities.fill(0.50f);
-    lossPresets[0].retriggerSeconds = 0.01;
-
-    // 1: 低频保留概率更高
-    for (int i = 0; i < kLossBandCount; ++i)
-    {
-        const float t = (float) i / (float) (kLossBandCount - 1);
-        lossPresets[1].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, 0.88f - 0.68f * t);
-    }
-    // lossPresets[1].retriggerSeconds = 0.18;
-    lossPresets[1].retriggerSeconds = 1;
-
-    // 2: 高频保留概率更高
-    for (int i = 0; i < kLossBandCount; ++i)
-    {
-        const float t = (float) i / (float) (kLossBandCount - 1);
-        lossPresets[2].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, 0.15f + 0.75f * t);
-    }
-    // lossPresets[2].retriggerSeconds = 0.12;
-    lossPresets[2].retriggerSeconds = 1;
-
-
-    // 3: 中频优先（钟形）
-    //    时序说明：属于 BPM 阵列预设；重触发间隔使用 16 分音符（60/BPM*0.25）。
-    //    单起点（中频附近）+ 固定窗口宽度，按低->高纯顺序推进；不叠加随机频段。
-
-    for (int i = 0; i < kLossBandCount; ++i)
-    {
-        const float t = (float) i / (float) (kLossBandCount - 1);
-        const float d = (t - 0.5f) / 0.22f;
-        lossPresets[3].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, 0.18f + 0.72f * std::exp(-(d * d)));
-    }
-    lossPresets[3].retriggerSeconds = 0.08;
-
-    // 4: 梳状分布
-    for (int i = 0; i < kLossBandCount; ++i)
-    {
-        const bool comb = ((i % 6) < 3);
-        lossPresets[4].probabilities[(size_t) i] = comb ? 0.82f : 0.18f;
-    }
-    lossPresets[4].retriggerSeconds = 0.09;
-
-    // 5: 低频+中高频双峰
-    for (int i = 0; i < kLossBandCount; ++i)
-    {
-        const float t = (float) i / (float) (kLossBandCount - 1);
-        const float d1 = (t - 0.20f) / 0.12f;
-        const float d2 = (t - 0.78f) / 0.16f;
-        const float v = 0.10f + 0.42f * std::exp(-(d1 * d1)) + 0.50f * std::exp(-(d2 * d2));
-        lossPresets[5].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, v);
-    }
-    lossPresets[5].retriggerSeconds = 0.14;
-
-    // 6: 周期波动分布
-    //    时序说明：属于 BPM 阵列预设；重触发间隔使用三连音网格（60/BPM/3）。
-    //    三起点并行阵列（低/中/高）+ 固定窗口，纯顺序推进；不叠加随机频段。
-
-    for (int i = 0; i < kLossBandCount; ++i)
-    {
-        const float t = (float) i / (float) (kLossBandCount - 1);
-        const float v = 0.5f + 0.38f * std::sin(2.0f * juce::MathConstants<float>::pi * (t * 3.0f + 0.1f));
-        lossPresets[6].probabilities[(size_t) i] = juce::jlimit(0.05f, 0.95f, v);
-    }
-    lossPresets[6].retriggerSeconds = 0.07;
-
-    // 7: 稀疏窄峰
-    //    时序说明：属于 BPM 阵列预设；重触发间隔使用 32 分音符（60/BPM*0.125）。
-    //    双起点 + 窄窗口 + 更快推进步长（每次2格），形成高速扫频感；不叠加随机频段。
-
-    lossPresets[7].probabilities.fill(0.10f);
-    for (int c : { 8, 19, 31, 46, 59, 73, 88, 96 })
-        for (int k = -1; k <= 1; ++k)
-            if (const int idx = c + k; idx >= 0 && idx < kLossBandCount)
-                lossPresets[7].probabilities[(size_t) idx] = (k == 0 ? 0.92f : 0.55f);
-    lossPresets[7].retriggerSeconds = 0.05;
-
-    // 8: 稳定轻丢失
-    lossPresets[8].probabilities.fill(0.72f);
-    lossPresets[8].retriggerSeconds = 0.30;
-
-    // 9: 激进丢失
-    lossPresets[9].probabilities.fill(0.26f);
-    lossPresets[9].retriggerSeconds = 0.06;
-
-    // 10: 低频稳定+高频随机
-    //     时序说明：属于 BPM 阵列预设；重触发间隔使用 8 分音符（60/BPM*0.5）。
-    //     双起点（从低频区域起步）+ 较宽窗口，纯顺序推进，听感更稳更厚；不叠加随机频段。
-
-    for (int i = 0; i < kLossBandCount; ++i)
-    {
-        const float t = (float) i / (float) (kLossBandCount - 1);
-        lossPresets[10].probabilities[(size_t) i] = (t < 0.35f ? 0.85f : 0.20f + 0.50f * t);
-    }
-    lossPresets[10].retriggerSeconds = 0.11;
-
-    // 11: 高频稳定+低频随机
-    //     时序说明：属于 BPM 阵列预设；重触发间隔使用附点 8 分音符（60/BPM*0.75）。
-    //     双起点（从高频区域起步）+ 反向推进，时值更长，扫动更“呼吸化”；不叠加随机频段。
-
-    for (int i = 0; i < kLossBandCount; ++i)
-    {
-        const float t = (float) i / (float) (kLossBandCount - 1);
-        lossPresets[11].probabilities[(size_t) i] = (t > 0.65f ? 0.86f : 0.18f + 0.55f * (1.0f - t));
-    }
-    lossPresets[11].retriggerSeconds = 0.10;
-}
 
 float LDSJvstAudioProcessor::getLossBandCenterHz(int bandIndex) noexcept
 {
@@ -159,37 +46,43 @@ float LDSJvstAudioProcessor::getLossBandCenterHz(int bandIndex) noexcept
 
 bool LDSJvstAudioProcessor::isBpmSequencedPreset(int presetIndex) noexcept
 {
-    return presetIndex == 3 || presetIndex == 6 || presetIndex == 7 || presetIndex == 10 || presetIndex == 11;
+    const auto cfg = display_present::getPresetParamsForChannel(presetIndex);
+    return cfg.lossSequence.enabled;
 }
 
 LDSJvstAudioProcessor::SequencedPresetProfile LDSJvstAudioProcessor::getSequencedPresetProfile(int presetIndex) noexcept
 {
-    switch (presetIndex)
-    {
-        case 3:  return { 1, 100, 50, 4, 1, false }; // 单起点，中频起步，平稳上行
-        case 6:  return { 3, 33, 6,  3, 1, false };  // 三起点，低-中-高并行阵列
-        case 7:  return { 2, 50, 8,  2, 2, false };  // 双起点，窄窗快速扫动
-        case 10: return { 2, 50, 0,  5, 1, false };  // 双起点，低频起步，较宽窗口
-        case 11: return { 2, 50, 80, 4, 1, true  };  // 双起点，高频起步，反向推进
-        default: return {};
-    }
+    const auto cfg = display_present::getPresetParamsForChannel(presetIndex);
+    const auto& seq = cfg.lossSequence;
+    if (! seq.enabled)
+        return {};
+
+    return {
+        juce::jlimit(1, 8, seq.anchorCount),
+        juce::jmax(1, seq.anchorSpacing),
+        juce::jlimit(0, kLossBandCount - 1, seq.baseStartBand),
+        juce::jmax(0, seq.halfWindow),
+        juce::jmax(1, seq.stepPerTick),
+        seq.reverse
+    };
 }
+
 
 double LDSJvstAudioProcessor::getSequencedRetriggerSeconds(int presetIndex, double bpm) const noexcept
 {
     const double safeBpm = juce::jlimit(40.0, 260.0, bpm > 0.0 ? bpm : 120.0);
     const double beatSec = 60.0 / safeBpm;
 
-    switch (presetIndex)
-    {
-        case 3:  return juce::jlimit(0.02, 0.50, beatSec * 0.25);      // 16分音符
-        case 6:  return juce::jlimit(0.02, 0.50, beatSec / 3.0);       // 三连音颗粒感
-        case 7:  return juce::jlimit(0.02, 0.50, beatSec * 0.125);     // 32分音符
-        case 10: return juce::jlimit(0.02, 0.80, beatSec * 0.50);      // 8分音符
-        case 11: return juce::jlimit(0.02, 0.80, beatSec * 0.75);      // 附点8分音符感
-        default: return 0.10;
-    }
+    const auto cfg = display_present::getPresetParamsForChannel(presetIndex);
+    const auto& seq = cfg.lossSequence;
+    if (! seq.enabled)
+        return 0.10;
+
+    return juce::jlimit((double) seq.minRetriggerSeconds,
+                        (double) seq.maxRetriggerSeconds,
+                        beatSec * (double) seq.bpmDivision);
 }
+
 
 double LDSJvstAudioProcessor::getRandomPresetRetriggerSeconds(double bpm) const noexcept
 {
@@ -198,7 +91,17 @@ double LDSJvstAudioProcessor::getRandomPresetRetriggerSeconds(double bpm) const 
     const double perBeat = (double) juce::jlimit(kRandomRetriggerPerBeatMin,
                                                   kRandomRetriggerPerBeatMax,
                                                   getRandomRetriggerPerBeat());
-    return juce::jlimit(0.01, 1.20, beatSec / perBeat);
+
+    const int channelId = juce::jlimit(LDSJvstAudioProcessor::kDisplayChannelMin,
+                                       LDSJvstAudioProcessor::kDisplayChannelMax,
+                                       getDisplayPresetIndex());
+    const auto cfg = display_present::getPresetParamsForChannel(channelId);
+    const auto& rnd = cfg.lossRandom;
+    const double scale = juce::jmax(0.0001, (double) rnd.perPresetScale);
+
+    return juce::jlimit((double) rnd.minRetriggerSeconds,
+                        (double) rnd.maxRetriggerSeconds,
+                        beatSec / (perBeat * scale));
 }
 
 void LDSJvstAudioProcessor::ensureLossFilters(double sampleRate)
@@ -397,8 +300,9 @@ void LDSJvstAudioProcessor::applyCutMaskToLossMask() noexcept
 
 void LDSJvstAudioProcessor::retriggerLossMask(double nowSeconds)
 {
-    const int preset = juce::jlimit(0, 11, getDisplayPresetIndex());
-    const auto& lp = lossPresets[(size_t) preset];
+    const int channelId = juce::jlimit(LDSJvstAudioProcessor::kDisplayChannelMin,
+                                       LDSJvstAudioProcessor::kDisplayChannelMax,
+                                       getDisplayPresetIndex());
 
     const float lowHz = juce::jlimit(kLowCutHzMin, kLowCutHzMax, getLowCutHz());
     const float highHz = juce::jlimit(kHighCutHzMin, kHighCutHzMax, getHighCutHz());
@@ -418,9 +322,9 @@ void LDSJvstAudioProcessor::retriggerLossMask(double nowSeconds)
 
     activeLossBandCount = 0;
 
-    if (isBpmSequencedPreset(preset))
+    if (isBpmSequencedPreset(channelId))
     {
-        const auto profile = getSequencedPresetProfile(preset);
+        const auto profile = getSequencedPresetProfile(channelId);
 
         for (int i = 0; i < kLossBandCount; ++i)
             lossMask[(size_t) i] = 0;
@@ -448,9 +352,8 @@ void LDSJvstAudioProcessor::retriggerLossMask(double nowSeconds)
         const int step = juce::jmax(1, profile.stepPerTick);
         sequenceHeadBand = (sequenceHeadBand + step) % kLossBandCount;
 
-        nextLossRetriggerSeconds = nowSeconds + getSequencedRetriggerSeconds(preset, hostBpm);
+        nextLossRetriggerSeconds = nowSeconds + getSequencedRetriggerSeconds(channelId, hostBpm);
     }
-
     else
     {
         for (int i = 0; i < kLossBandCount; ++i)
@@ -461,7 +364,8 @@ void LDSJvstAudioProcessor::retriggerLossMask(double nowSeconds)
                 continue;
             }
 
-            const float p = juce::jlimit(0.0f, 1.0f, lp.probabilities[(size_t) i]);
+            const float p = juce::jlimit(0.0f, 1.0f,
+                                         display_present::getLossKeepProbabilityForChannel(channelId, i, kLossBandCount));
             const bool keep = lossRandom.nextFloat() < p;
             lossMask[(size_t) i] = keep ? (uint8_t) 1 : (uint8_t) 0;
 
@@ -473,7 +377,6 @@ void LDSJvstAudioProcessor::retriggerLossMask(double nowSeconds)
     }
 
     applyCutMaskToLossMask();
-
 }
 
 bool LDSJvstAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -501,6 +404,9 @@ bool LDSJvstAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 void LDSJvstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     isShuttingDown.store(false, std::memory_order_release);
+
+    const juce::SpinLock::ScopedLockType processingLock(processingStateLock);
+
     isPrepared.store(true, std::memory_order_release);
     sequenceHeadBand = 0;
 
@@ -512,7 +418,10 @@ void LDSJvstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
 
     lossTimeSeconds = 0.0;
     nextLossRetriggerSeconds = 0.0;
-    lastLossPresetIndex = juce::jlimit(0, 11, getDisplayPresetIndex());
+    lastLossPresetIndex = juce::jlimit(LDSJvstAudioProcessor::kDisplayChannelMin,
+                                      LDSJvstAudioProcessor::kDisplayChannelMax,
+                                      getDisplayPresetIndex());
+
     currentLowCutHzForMask = getLowCutHz();
     currentHighCutHzForMask = getHighCutHz();
     currentCutModeForMask = getCutMode();
@@ -551,6 +460,9 @@ void LDSJvstAudioProcessor::releaseResources()
 {
     isPrepared.store(false, std::memory_order_release);
     isShuttingDown.store(true, std::memory_order_release);
+
+    const juce::SpinLock::ScopedLockType processingLock(processingStateLock);
+
     nextLossRetriggerSeconds = std::numeric_limits<double>::infinity();
     activeLossBandCount = 0;
     droppedLossBandCount = 0;
@@ -632,6 +544,10 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 {
     juce::ScopedNoDenormals noDenormals;
 
+    if (isShuttingDown.load(std::memory_order_acquire) || (! isPrepared.load(std::memory_order_acquire)))
+        return;
+
+    const juce::SpinLock::ScopedLockType processingLock(processingStateLock);
     if (isShuttingDown.load(std::memory_order_acquire) || (! isPrepared.load(std::memory_order_acquire)))
         return;
 
@@ -759,7 +675,10 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
     ensureLossFilters(getSampleRate());
 
-    const int currentPreset = juce::jlimit(0, 11, getDisplayPresetIndex());
+    const int currentPreset = juce::jlimit(LDSJvstAudioProcessor::kDisplayChannelMin,
+                                           LDSJvstAudioProcessor::kDisplayChannelMax,
+                                           getDisplayPresetIndex());
+
     if (currentPreset != lastLossPresetIndex)
     {
         if (! isLossMaskFrozen())
@@ -903,6 +822,8 @@ void LDSJvstAudioProcessor::setStateInformation(const void* data, int sizeInByte
     // 兼容未来可能的类型调整
     if (! state.hasType("LDSJvstState"))
         return;
+
+    const juce::SpinLock::ScopedLockType processingLock(processingStateLock);
 
     setDisplayPresetIndex((int) state.getProperty("preset", 0));
     bypassed.store(((int) state.getProperty("bypassed", 0)) != 0, std::memory_order_relaxed);

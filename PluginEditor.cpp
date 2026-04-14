@@ -772,7 +772,12 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                          0, 0, lw, lh,
                          false);
 
+            // 给预设0的雪花底图加一层黑色滤镜，压低亮度以和其他预设统一
+            gg.setColour(juce::Colours::black.withAlpha(0.24f));
+            gg.fillRect(sb);
+
             const auto neonGreen = juce::Colour::fromRGB(0x39, 0xFF, 0x14);
+
             const float pixelStep = 3.0f;
             auto qx = [pixelStep, x0 = sb.getX()](float x) { return x0 + std::round((x - x0) / pixelStep) * pixelStep; };
             auto qy = [pixelStep, y0 = sb.getY()](float y) { return y0 + std::round((y - y0) / pixelStep) * pixelStep; };
@@ -1491,7 +1496,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
 
             const auto channelOuter = juce::Rectangle<float>(sb.getX() + cox, sb.getY() + coy, cow, coh);
 
-            const float channelFontSize = juce::jlimit(16.0f, 26.0f, channelOuter.getHeight() * 0.78f);
+            const float channelFontSize = juce::jlimit(31.0f, 52.0f, channelOuter.getHeight() * 0.78f);
             gg.setFont(juce::Font(channelFontSize, juce::Font::bold));
 
             gg.setColour(juce::Colours::black.withAlpha(0.72f));
@@ -1525,7 +1530,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
 
             const auto modeOuter = juce::Rectangle<float>(sb.getX() + mox, sb.getY() + moy, mow, moh);
 
-            const float lineFontSize = juce::jlimit(12.0f, 17.0f, modeOuter.getHeight() * 0.33f);
+            const float lineFontSize = juce::jlimit(24.0f, 34.0f, modeOuter.getHeight() * 0.33f);
             gg.setFont(juce::Font(lineFontSize, juce::Font::plain));
 
             auto line1 = modeOuter;
@@ -2225,6 +2230,15 @@ void LDSJvstAudioProcessorEditor::cycleCutModeOrSlopeFromTV()
     oscilloscope.repaint();
 }
 
+void LDSJvstAudioProcessorEditor::toggleSleepFreezeFromUI()
+{
+    if (editorShuttingDown || processor.isShuttingDownNow())
+        return;
+
+    processor.toggleLossMaskFrozen();
+    oscilloscope.repaint();
+}
+
 
 float LDSJvstAudioProcessorEditor::getVolumeOsdT() noexcept
 
@@ -2300,9 +2314,18 @@ void LDSJvstAudioProcessorEditor::triggerChannelJumpNow()
     if (pendingChannelDigits.isEmpty())
         return;
 
-    channelDisplayText = pendingChannelDigits;
+    const juce::String submittedChannel = pendingChannelDigits;
     pendingChannelDigits.clear();
 
+    const int channelIndex = submittedChannel.getIntValue();
+    if (channelIndex >= 0 && channelIndex < presetCount)
+    {
+        setSelectedPresetIndex(channelIndex);
+        return;
+    }
+
+    // 超出当前可用频道范围时，仅显示输入结果，不切换预设
+    channelDisplayText = submittedChannel;
     channelOsdCurrentDurationSeconds = channelInputOsdDurationSeconds;
     channelOsdActive = true;
     channelOsdStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
@@ -2847,8 +2870,14 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
             {
                 owner.toggleLossAlgorithmFromUI();
             }
+            // SLEEP：冻结/恢复当前频带丢失状态（下方像素格子停/继续变化）
+            else if (std::strcmp (b.name, "SLEEP") == 0)
+            {
+                owner.toggleSleepFreezeFromUI();
+            }
             // 数字键：输入频道（最多4位；3秒不输入自动跳转）
             else
+
             {
                 const juce::String buttonName = juce::String::fromUTF8(b.name);
                 if (buttonName.startsWith("数字"))

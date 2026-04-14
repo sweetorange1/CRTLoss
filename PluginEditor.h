@@ -326,7 +326,9 @@ private:
     void nudgePreGainDbFromUI (float deltaDb);
     void toggleLossAlgorithmFromUI(); // 遥控器 ST/SAP：在两种频带丢失算法间切换
     void cycleCutModeOrSlopeFromTV(); // 遥控器 TV：硬裁剪 <-> HPF/LPF，且在HPF/LPF内轮换12/24/48dB
+    void toggleSleepFreezeFromUI();   // 遥控器 SLEEP：冻结/恢复频带丢失变化
     float getVolumeOsdT() noexcept; // 0..1（时间进度），0 表示不显示
+
     float getModeOsdT() noexcept;   // 0..1（TV/ST-SAP 状态时间进度），0 表示不显示
 
     void pushChannelDigitFromRemote (int digit); // 遥控器 0-9：频道输入（最多4位）

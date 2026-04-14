@@ -762,14 +762,17 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const int currentPreset = juce::jlimit(0, 11, getDisplayPresetIndex());
     if (currentPreset != lastLossPresetIndex)
     {
-        lastLossPresetIndex = currentPreset;
-        retriggerLossMask(lossTimeSeconds);
+        if (! isLossMaskFrozen())
+        {
+            lastLossPresetIndex = currentPreset;
+            retriggerLossMask(lossTimeSeconds);
+        }
     }
 
     const double blockSeconds = (double) buffer.getNumSamples() / juce::jmax(1.0, getSampleRate());
     lossTimeSeconds += blockSeconds;
 
-    if (lossTimeSeconds >= nextLossRetriggerSeconds)
+    if (! isLossMaskFrozen() && (lossTimeSeconds >= nextLossRetriggerSeconds))
         retriggerLossMask(lossTimeSeconds);
 
     const float lowCutNow = getLowCutHz();

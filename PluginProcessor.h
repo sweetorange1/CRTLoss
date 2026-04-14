@@ -112,6 +112,22 @@ public:
                                  : kLossAlgorithmLegacy);
     }
 
+    // Sleep 冻结：true 时保持当前频带丢失掩码，不再进行下一次重随机/时序推进
+    bool isLossMaskFrozen() const noexcept
+    {
+        return lossMaskFrozen.load(std::memory_order_acquire);
+    }
+
+    void setLossMaskFrozen(bool frozen) noexcept
+    {
+        lossMaskFrozen.store(frozen, std::memory_order_release);
+    }
+
+    void toggleLossMaskFrozen() noexcept
+    {
+        setLossMaskFrozen(! isLossMaskFrozen());
+    }
+
     // 频段丢失调度前的高低切（Hz）
     static constexpr float kLowCutHzMin = 20.0f;
     static constexpr float kLowCutHzMax = 20000.0f;
@@ -263,7 +279,9 @@ private:
     std::atomic<float> limiterThreshold { 1.0f };
     std::atomic<float> lossNotchQ { 6.0f };
     std::atomic<int> lossAlgorithmMode { kLossAlgorithmLegacy };
+    std::atomic<bool> lossMaskFrozen { false };
     std::atomic<float> lowCutHz { kLowCutHzMin };
+
     std::atomic<float> highCutHz { kHighCutHzMax };
     std::atomic<int> cutMode { kCutModeHardMask };
     std::atomic<int> cutSlopeDbPerOct { kCutSlope12dB };

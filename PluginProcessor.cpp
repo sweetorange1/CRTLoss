@@ -462,7 +462,10 @@ void LDSJvstAudioProcessor::releaseResources()
     isPrepared.store(false, std::memory_order_release);
     isShuttingDown.store(true, std::memory_order_release);
 
-    const juce::SpinLock::ScopedLockType processingLock(processingStateLock);
+    // 宿主卸载阶段不阻塞等待音频线程，避免与 processBlock 内部路径互相等待导致卡死。
+    const juce::SpinLock::ScopedTryLockType processingLock(processingStateLock);
+    if (! processingLock.isLocked())
+        return;
 
     nextLossRetriggerSeconds = std::numeric_limits<double>::infinity();
     activeLossBandCount = 0;
@@ -840,7 +843,10 @@ void LDSJvstAudioProcessor::setStateInformation(const void* data, int sizeInByte
     if (! state.hasType("LDSJvstState"))
         return;
 
-    const juce::SpinLock::ScopedLockType processingLock(processingStateLock);
+    // 某些宿主会在销毁/重建边界调用状态恢复；这里避免阻塞等待音频线程。
+    const juce::SpinLock::ScopedTryLockType processingLock(processingStateLock);
+    if (! processingLock.isLocked())
+        return;
 
     setDisplayPresetIndex((int) state.getProperty("preset", 0));
     bypassed.store(((int) state.getProperty("bypassed", 0)) != 0, std::memory_order_relaxed);

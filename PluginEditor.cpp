@@ -6,7 +6,7 @@
 
 namespace
 {
-    static constexpr auto kPluginUiVersionText = "v1.1.6";
+    static constexpr auto kPluginUiVersionText = "v1.1.8";
 }
 
 // --- BypassHitArea ---
@@ -556,18 +556,19 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             {
                 // 点阵遮罩：用 tiled fill 做“点阵/子像素”感（比逐像素更快）
                 const int step = juce::jlimit(2, 6, 4);
-                static juce::Image tile;
-                if (! tile.isValid())
+                if ((! dotMaskTile.isValid())
+                    || dotMaskTile.getWidth() != step * 2
+                    || dotMaskTile.getHeight() != step * 2)
                 {
-                    tile = juce::Image(juce::Image::ARGB, step * 2, step * 2, true);
-                    juce::Graphics tg(tile);
+                    dotMaskTile = juce::Image(juce::Image::ARGB, step * 2, step * 2, true);
+                    juce::Graphics tg(dotMaskTile);
                     tg.fillAll(juce::Colours::transparentBlack);
                     tg.setColour(juce::Colours::white.withAlpha(0.06f));
                     tg.fillEllipse(0.0f, 0.0f, (float) step, (float) step);
                     tg.fillEllipse((float) step, (float) step, (float) step, (float) step);
                 }
 
-                gg.setTiledImageFill(tile, (int) std::fmod(seconds * 12.0f * bg.motionSpeed, (float) (step * 2)),
+                gg.setTiledImageFill(dotMaskTile, (int) std::fmod(seconds * 12.0f * bg.motionSpeed, (float) (step * 2)),
                                      (int) std::fmod(seconds * 6.0f * bg.motionSpeed, (float) (step * 2)),
                                      1.0f);
                 gg.setOpacity(0.35f);

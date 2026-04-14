@@ -206,6 +206,8 @@ private:
         // 屏幕离屏缓冲：用于做“按行 remap”的电视机行同步噪声扭曲
         juce::Image screenBase;
         juce::Image screenWarp;
+        // dotMask 纹理缓存：避免使用函数内 static 对象，确保生命周期跟随编辑器组件
+        juce::Image dotMaskTile;
         int screenBufferW = 0;
         int screenBufferH = 0;
 

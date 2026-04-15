@@ -50,6 +50,12 @@ private:
     static constexpr int remoteH = 488;
     static constexpr int remoteLift = 415; // 拿出来时向上平移（684 -> 269）
 
+    // 遥控器灯图（按基准尺寸布局）
+    static constexpr int remoteLightX = 789;
+    static constexpr int remoteLightY = 290;
+    static constexpr int remoteLightW = 29;
+    static constexpr int remoteLightH = 29;
+
     // 遥控器上的 bypass 按钮（相对遥控器图片左上角的偏移，按基准尺寸）
     // 用户给的基准坐标：左上角(305,416) 大小 68*10（此坐标对应“遥控器被拿出来”后的界面位置）
     static constexpr int remoteBypassOffsetX = 73;  // 305 - remoteX
@@ -71,6 +77,7 @@ private:
     juce::Image tvImage;
     juce::Image bypassImage;
     juce::Image remoteImage;
+    juce::Image remoteLightImage;
 
     int selectedPresetIndex = 0;
     int previousPresetIndex = 0;

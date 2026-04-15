@@ -38,6 +38,7 @@ juce_add_binary_data(
         assets/TV.png
         assets/BYPASS.png
         assets/remote_control.png
+        assets/remote_control_light.png
 )
 
 target_compile_definitions(LDSJvst

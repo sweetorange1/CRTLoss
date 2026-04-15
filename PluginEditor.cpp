@@ -6,7 +6,7 @@
 
 namespace
 {
-    static constexpr auto kPluginUiVersionText = "v1.1.8";
+    static constexpr auto kPluginUiVersionText = "v1.1.10";
 }
 
 // --- BypassHitArea ---
@@ -2065,6 +2065,21 @@ LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& 
     bypassImage = juce::ImageCache::getFromMemory(BinaryData::BYPASS_png, BinaryData::BYPASS_pngSize);
     remoteImage = juce::ImageCache::getFromMemory(BinaryData::remote_control_png, BinaryData::remote_control_pngSize);
 
+    int remoteLightSize = 0;
+    const char* remoteLightNames[] = {
+        "remote_control_light.png",
+        "remote_control_light_png",
+        "assets/remote_control_light.png"
+    };
+    for (const auto* name : remoteLightNames)
+    {
+        if (const auto* remoteLightData = BinaryData::getNamedResource(name, remoteLightSize))
+        {
+            remoteLightImage = juce::ImageCache::getFromMemory(remoteLightData, remoteLightSize);
+            break;
+        }
+    }
+
     setResizable(true, true);
 
     resizeConstrainer.setFixedAspectRatio(editorAspectRatio);
@@ -2672,7 +2687,30 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::paint (juce::Graphics& g
 
     g.drawImage(owner.remoteImage, target, juce::RectanglePlacement::stretchToFit, false);
 
+    if (remotePressedButtonIndex >= 0)
+    {
+        const auto lightTarget = juce::Rectangle<float>(
+            remoteLightX * scale,
+            remoteLightY * scale,
+            remoteLightW * scale,
+            remoteLightH * scale
+        );
+
+        if (owner.remoteLightImage.isValid())
+        {
+            g.drawImage(owner.remoteLightImage, lightTarget, juce::RectanglePlacement::stretchToFit, false);
+        }
+        else
+        {
+            g.setColour(juce::Colours::yellow.withAlpha(0.85f));
+            g.fillEllipse(lightTarget);
+            g.setColour(juce::Colours::white.withAlpha(0.70f));
+            g.drawEllipse(lightTarget, juce::jmax(1.0f, 1.5f * scale));
+        }
+    }
+
     // 遥控器按下态：对被按下的按钮区域叠加黑色遮罩（模拟按键被压下）
+
     // 备注：以下名称均为“遥控器上的名字”（用于后续接入逻辑时对照）
     struct RemoteButton
     {

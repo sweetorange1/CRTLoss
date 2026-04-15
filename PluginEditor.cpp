@@ -6,7 +6,46 @@
 
 namespace
 {
-    static constexpr auto kPluginUiVersionText = "v1.1.10";
+    static constexpr auto kPluginUiVersionText = "v1.3.0";
+
+    enum class TvPanelButtonAction
+    {
+        VolUp,
+        VolDown,
+        ChannelUp,
+        ChannelDown,
+    };
+
+    struct TvPanelButtonDef
+    {
+        TvPanelButtonAction action;
+        float x1, y1;
+        float x2, y2;
+        float x3, y3;
+        float x4, y4;
+    };
+
+    static constexpr TvPanelButtonDef kTvPanelButtons[] = {
+        // VOL+
+        { TvPanelButtonAction::VolUp,       910.0f, 273.0f, 947.0f, 273.0f, 947.0f, 298.0f, 904.0f, 298.0f },
+        // VOL-
+        { TvPanelButtonAction::VolDown,     865.0f, 273.0f, 909.0f, 273.0f, 903.0f, 298.0f, 865.0f, 298.0f },
+        // 频道增加
+        { TvPanelButtonAction::ChannelUp,   912.0f, 149.0f, 948.0f, 149.0f, 948.0f, 175.0f, 905.0f, 175.0f },
+        // 频道减少
+        { TvPanelButtonAction::ChannelDown, 866.0f, 149.0f, 911.0f, 149.0f, 904.0f, 175.0f, 866.0f, 175.0f },
+    };
+
+    static juce::Path makeScaledTvPanelButtonPath(const TvPanelButtonDef& b, float scale)
+    {
+        juce::Path p;
+        p.startNewSubPath(b.x1 * scale, b.y1 * scale);
+        p.lineTo(b.x2 * scale, b.y2 * scale);
+        p.lineTo(b.x3 * scale, b.y3 * scale);
+        p.lineTo(b.x4 * scale, b.y4 * scale);
+        p.closeSubPath();
+        return p;
+    }
 }
 
 // --- BypassHitArea ---
@@ -26,6 +65,159 @@ void LDSJvstAudioProcessorEditor::BypassHitArea::paint (juce::Graphics& g)
 void LDSJvstAudioProcessorEditor::BypassHitArea::mouseUp (const juce::MouseEvent&)
 {
     owner.toggleBypassFromUI();
+}
+
+bool LDSJvstAudioProcessorEditor::TvOverlayComponent::hitTest (int x, int y)
+{
+    if (owner.remotePulledOut || owner.getRemotePullAmount() > 0.001f)
+        return false;
+
+    const float scale = (float) owner.getWidth() / (float) baseEditorWidth;
+    for (const auto& b : kTvPanelButtons)
+    {
+        const auto p = makeScaledTvPanelButtonPath(b, scale);
+        if (p.contains((float) x, (float) y))
+            return true;
+    }
+
+    return false;
+}
+
+void LDSJvstAudioProcessorEditor::TvOverlayComponent::paint (juce::Graphics& g)
+{
+    if (! image.isValid())
+        return;
+
+    g.drawImageWithin(image,
+                      0, 0, getWidth(), getHeight(),
+                      juce::RectanglePlacement::stretchToFit,
+                      false);
+
+    if (pressedPanelButtonIndex >= 0)
+    {
+        const int idx = juce::jlimit(0, (int) (std::size(kTvPanelButtons) - 1), pressedPanelButtonIndex);
+        const float scale = (float) owner.getWidth() / (float) baseEditorWidth;
+        const auto p = makeScaledTvPanelButtonPath(kTvPanelButtons[idx], scale);
+
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
+        g.fillPath(p);
+    }
+}
+
+void LDSJvstAudioProcessorEditor::TvOverlayComponent::mouseDown (const juce::MouseEvent& e)
+{
+    if (owner.remotePulledOut)
+        return;
+
+    const auto p = e.position;
+    const float scale = (float) owner.getWidth() / (float) baseEditorWidth;
+
+    for (int i = 0; i < (int) std::size(kTvPanelButtons); ++i)
+    {
+        const auto btnPath = makeScaledTvPanelButtonPath(kTvPanelButtons[i], scale);
+        if (! btnPath.contains(p.x, p.y))
+            continue;
+
+        pressedPanelButtonIndex = i;
+        const auto action = kTvPanelButtons[i].action;
+
+        if (action == TvPanelButtonAction::VolUp)
+        {
+            volumeRepeatActive = true;
+            volumeRepeatDir = +1;
+            volumeRepeatPressSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+            volumeRepeatLastStepSeconds = volumeRepeatPressSeconds;
+            owner.nudgePreGainDbFromUI(+1.0f);
+            startTimerHz(60);
+        }
+        else if (action == TvPanelButtonAction::VolDown)
+        {
+            volumeRepeatActive = true;
+            volumeRepeatDir = -1;
+            volumeRepeatPressSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
+            volumeRepeatLastStepSeconds = volumeRepeatPressSeconds;
+            owner.nudgePreGainDbFromUI(-1.0f);
+            startTimerHz(60);
+        }
+        else
+        {
+            volumeRepeatActive = false;
+            volumeRepeatDir = 0;
+            stopTimer();
+        }
+
+        repaint();
+        return;
+    }
+}
+
+void LDSJvstAudioProcessorEditor::TvOverlayComponent::mouseUp (const juce::MouseEvent& e)
+{
+    if (pressedPanelButtonIndex < 0)
+        return;
+
+    const int idx = juce::jlimit(0, (int) (std::size(kTvPanelButtons) - 1), pressedPanelButtonIndex);
+    const auto action = kTvPanelButtons[idx].action;
+
+    const float scale = (float) owner.getWidth() / (float) baseEditorWidth;
+    const auto btnPath = makeScaledTvPanelButtonPath(kTvPanelButtons[idx], scale);
+    const bool releasedOnSameButton = btnPath.contains(e.position.x, e.position.y);
+
+    const bool wasVolButton = (action == TvPanelButtonAction::VolUp) || (action == TvPanelButtonAction::VolDown);
+
+    pressedPanelButtonIndex = -1;
+
+    if (wasVolButton)
+    {
+        volumeRepeatActive = false;
+        volumeRepeatDir = 0;
+        stopTimer();
+    }
+
+    repaint();
+
+    if (! releasedOnSameButton || wasVolButton)
+        return;
+
+    if (action == TvPanelButtonAction::ChannelUp)
+    {
+        const int cur = owner.getSelectedPresetIndex();
+        const int next = (cur >= display_present::kDerivedChannelMax) ? 0 : (cur + 1);
+        owner.setSelectedPresetIndex(next);
+    }
+    else if (action == TvPanelButtonAction::ChannelDown)
+    {
+        const int cur = owner.getSelectedPresetIndex();
+        const int prev = (cur <= 0) ? display_present::kDerivedChannelMax : (cur - 1);
+        owner.setSelectedPresetIndex(prev);
+    }
+}
+
+void LDSJvstAudioProcessorEditor::TvOverlayComponent::timerCallback()
+{
+    if (owner.editorShuttingDown || owner.processor.isShuttingDownNow())
+    {
+        stopTimer();
+        volumeRepeatActive = false;
+        volumeRepeatDir = 0;
+        return;
+    }
+
+    if ((! volumeRepeatActive) || volumeRepeatDir == 0 || pressedPanelButtonIndex < 0)
+    {
+        stopTimer();
+        return;
+    }
+
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    if ((now - volumeRepeatPressSeconds) < volumeRepeatInitialDelaySeconds)
+        return;
+
+    if ((now - volumeRepeatLastStepSeconds) >= volumeRepeatIntervalSeconds)
+    {
+        owner.nudgePreGainDbFromUI((float) volumeRepeatDir);
+        volumeRepeatLastStepSeconds = now;
+    }
 }
 
 LDSJvstAudioProcessorEditor::OscilloscopeComponent::OscilloscopeComponent(LDSJvstAudioProcessorEditor& o,
@@ -2153,19 +2345,55 @@ void LDSJvstAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillAll(juce::Colours::black);
 }
 
-void LDSJvstAudioProcessorEditor::paintOverChildren(juce::Graphics& g)
+juce::Rectangle<float> LDSJvstAudioProcessorEditor::getVersionTagBounds() const
 {
     const auto area = getLocalBounds().toFloat();
     const float marginX = juce::jmax(5.0f, area.getWidth() * 0.008f);
     const float marginY = juce::jmax(4.0f, area.getHeight() * 0.006f);
-    const float h = juce::jmax(9.0f, area.getHeight() * 0.016f);
-    const float w = juce::jmax(52.0f, area.getWidth() * 0.075f);
+    const float h = juce::jmax(11.0f, area.getHeight() * 0.019f);
+    const float w = juce::jmax(66.0f, area.getWidth() * 0.092f);
 
-    const auto tag = juce::Rectangle<float>(area.getRight() - marginX - w, area.getY() + marginY, w, h);
+    return juce::Rectangle<float>(area.getRight() - marginX - w, area.getY() + marginY, w, h);
+}
 
-    g.setFont(juce::Font(juce::jmax(7.0f, h * 0.70f), juce::Font::plain));
+void LDSJvstAudioProcessorEditor::paintOverChildren(juce::Graphics& g)
+{
+    const auto tag = getVersionTagBounds();
+
+    auto versionFont = juce::Font(juce::jmax(8.0f, tag.getHeight() * 0.74f), juce::Font::plain);
+    versionFont.setUnderline(versionTagHovered);
+    g.setFont(versionFont);
     g.setColour(juce::Colours::black.withAlpha(0.50f));
     g.drawText(kPluginUiVersionText, tag, juce::Justification::centredRight, true);
+}
+
+void LDSJvstAudioProcessorEditor::mouseMove (const juce::MouseEvent& e)
+{
+    const bool hovering = getVersionTagBounds().contains(e.position);
+
+    if (versionTagHovered != hovering)
+    {
+        versionTagHovered = hovering;
+        setMouseCursor(versionTagHovered ? juce::MouseCursor::PointingHandCursor
+                                         : juce::MouseCursor::NormalCursor);
+        repaint();
+    }
+}
+
+void LDSJvstAudioProcessorEditor::mouseExit (const juce::MouseEvent&)
+{
+    if (! versionTagHovered)
+        return;
+
+    versionTagHovered = false;
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
+void LDSJvstAudioProcessorEditor::mouseUp (const juce::MouseEvent& e)
+{
+    if (getVersionTagBounds().contains(e.position))
+        juce::URL("https://iisaacbeats.cn").launchInDefaultBrowser();
 }
 
 void LDSJvstAudioProcessorEditor::toggleBypassFromUI()
@@ -2822,11 +3050,25 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseDown (const juce::M
     for (int i = 0; i < (int) std::size(buttons); ++i)
     {
         const auto& b = buttons[i];
-        const auto r = juce::Rectangle<float>(
+
+        const auto visualButtonRect = juce::Rectangle<float>(
             x + b.offsetX * scale,
             y + b.offsetY * scale,
             b.w * scale,
             b.h * scale
+        );
+
+        // 仅放大“触发按下状态”的判定区域：面积约 +50%（线性尺寸约 *1.225）
+        // 当前按钮布局间距足够，此放大系数不会造成相邻按钮判定区域重叠。
+        static constexpr float triggerAreaScale = 1.5f;
+        const float expandedW = visualButtonRect.getWidth() * triggerAreaScale;
+        const float expandedH = visualButtonRect.getHeight() * triggerAreaScale;
+
+        const auto r = juce::Rectangle<float>(
+            visualButtonRect.getCentreX() - expandedW * 0.5f,
+            visualButtonRect.getCentreY() - expandedH * 0.5f,
+            expandedW,
+            expandedH
         );
 
         if (r.contains(p))

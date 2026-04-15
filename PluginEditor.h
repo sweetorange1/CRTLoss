@@ -14,6 +14,9 @@ public:
     void paint(juce::Graphics&) override;
     void paintOverChildren(juce::Graphics&) override;
     void resized() override;
+    void mouseUp (const juce::MouseEvent& e) override;
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseExit (const juce::MouseEvent& e) override;
 
 private:
     static constexpr int baseEditorWidth  = 1000;
@@ -137,28 +140,38 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(IndicatorLight)
     };
 
-    class TvOverlayComponent final : public juce::Component
+    class TvOverlayComponent final : public juce::Component,
+                                     private juce::Timer
     {
     public:
-        explicit TvOverlayComponent (const juce::Image& img)
-            : image (img)
+        TvOverlayComponent (LDSJvstAudioProcessorEditor& ownerEditor, const juce::Image& img)
+            : owner (ownerEditor), image (img)
         {
-            setInterceptsMouseClicks(false, false);
+            setInterceptsMouseClicks(true, false);
         }
 
-        void paint (juce::Graphics& g) override
-        {
-            if (! image.isValid())
-                return;
+        ~TvOverlayComponent() override = default;
 
-            g.drawImageWithin(image,
-                              0, 0, getWidth(), getHeight(),
-                              juce::RectanglePlacement::stretchToFit,
-                              false);
-        }
+        bool hitTest (int x, int y) override;
+        void paint (juce::Graphics& g) override;
+
+        void mouseDown (const juce::MouseEvent& e) override;
+        void mouseUp (const juce::MouseEvent& e) override;
 
     private:
+        void timerCallback() override;
+
+        LDSJvstAudioProcessorEditor& owner;
         const juce::Image& image;
+
+        int pressedPanelButtonIndex = -1;
+
+        bool volumeRepeatActive = false;
+        int volumeRepeatDir = 0; // +1 = VOL+，-1 = VOL-
+        double volumeRepeatPressSeconds = 0.0;
+        double volumeRepeatLastStepSeconds = 0.0;
+        static constexpr double volumeRepeatInitialDelaySeconds = 0.32;
+        static constexpr double volumeRepeatIntervalSeconds = 0.075;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TvOverlayComponent)
     };
@@ -248,7 +261,7 @@ private:
     LDSJvstAudioProcessor& processor;
     OscilloscopeComponent oscilloscope;
     BypassHitArea bypassHitArea { *this };
-    TvOverlayComponent tvOverlay { tvImage };
+    TvOverlayComponent tvOverlay { *this, tvImage };
     juce::OwnedArray<IndicatorLight> presetLights;
 
     class RemoteControlOverlay final : public juce::Component
@@ -386,6 +399,9 @@ private:
     static constexpr double channelInputOsdDurationSeconds = 1.2;
     static constexpr double presetChannelOsdDurationSeconds = 3.0;
     double channelOsdCurrentDurationSeconds = channelInputOsdDurationSeconds;
+
+    juce::Rectangle<float> getVersionTagBounds() const;
+    bool versionTagHovered = false;
 
     bool editorShuttingDown = false;
 

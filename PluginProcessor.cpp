@@ -650,6 +650,36 @@ void LDSJvstAudioProcessor::retriggerLossMask(double nowSeconds)
     }
 
     applyCutMaskToLossMask();
+
+    // ------------------------------------------------------------
+    // 抑制"重触发瞬间"的电流声（仅影响 IIR 分支：Legacy / UniformBandwidth）
+    // ------------------------------------------------------------
+    // 原因分析：每个频段的 juce::IIRFilter Notch 无论 wet 是否为 0，都在被
+    // 干路 x 持续激励。长时间处于 wet=0（保留）的 band，其 direct-form 内部
+    // 延迟状态 v1/v2 已累积了与输入信号能量相关的稳态数值；一旦本次重触发
+    // 把它切换为"丢弃"，wet 会在几十毫秒内从 0 平滑到 1，此时接入的滤波器
+    // 输出就带着它稳态状态形成的瞬态尾巴。100 个 Notch 中若有几十个同时经历
+    // 这个过程，叠加起来听感就是一声明显的"咔哒 / 电流声"。
+    //
+    // 修复：识别"本次新变为丢弃 (previous=1 且 current=0)"的 band，把对应
+    // Notch 的内部状态清零，并让 wet 从 0 严格重新起步——保证滤波器和 wet 的
+    // 相对相位一致（都从零起）。反方向（0 → 1，退出丢弃）不需要 reset，因为
+    // wet 会从 1 平滑到 0，接入量在减少，不会激发瞬态。
+    for (int b = 0; b < kLossBandCount; ++b)
+    {
+        const uint8_t prev = previousLossMask[(size_t) b];
+        const uint8_t curr = lossMask[(size_t) b];
+        // 约定：lossMask[b]==0 表示"该频段被丢弃"（wet 目标=1）；==1 表示"保留"（wet 目标=0）
+        const bool newlyDropped = (prev == 1) && (curr == 0);
+        if (newlyDropped)
+        {
+            lossBandNotchL[(size_t) b].reset();
+            lossBandNotchR[(size_t) b].reset();
+            lossBandWet[(size_t) b] = 0.0f;
+        }
+    }
+
+    previousLossMask = lossMask;
 }
 
 bool LDSJvstAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -709,6 +739,7 @@ void LDSJvstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
 
     droppedLossBandCount = 0;
     lossMask.fill(1);
+    previousLossMask.fill(1);
     lossBandWet.fill(1.0f);
 
     cutCrossfadeSamplesRemaining = 0;
@@ -765,6 +796,7 @@ void LDSJvstAudioProcessor::releaseResources()
     currentLossMaskInvertedForMask = isLossMaskInverted() ? 1 : 0;
 
     lossMask.fill(1);
+    previousLossMask.fill(1);
 
     lossBandWet.fill(0.0f);
 

@@ -7,9 +7,9 @@
 - **公司**：iisaacbeats.cn
 - **JUCE 版本**：8.0.12
 - **插件格式**：VST3 + Standalone
-- **CMake 版本号**（`CMakeLists.txt` 中 `juce_add_plugin` 的 `VERSION`）：`1.1.7`
+- **CMake 版本号**（`CMakeLists.txt` 中 `juce_add_plugin` 的 `VERSION`）：`1.1.8`
 - **UI 版本号**（`PluginEditor.cpp` 中 `kPluginUiVersionText`）：`v1.3.1`
-- **文档版本**：`0.0.2`
+- **文档版本**：`0.0.3`
 
 ---
 
@@ -66,7 +66,7 @@
 | `cutSlopeDbPerOct` | 12 / 24 / 48 | 12 | HPF/LPF 斜率（遥控 `TV` 循环切换） |
 | `displayPresetIndex` | 0..9999 (kDerivedChannelMax) | 0 | 当前"频道号" |
 | `kLossBandCount` | 100 | — | 频段数（编辑器侧 `kLossBandCountForUI`=100） |
-| `kLossMaskSmoothingTimeSeconds` | 0.010 | — | wet 系数指数平滑时间 |
+| `kLossMaskSmoothingTimeSeconds` | 0.025 | — | wet 系数指数平滑时间（10ms → 25ms） |
 | `kCutCrossfadeSamples` | 1024 | — | 高低切切换时的交叉淡化样本数 |
 
 ### 2.2 Loss 三种算法
@@ -75,8 +75,8 @@
 
 | 模式 | 常量 | 实现方式 | 特点 |
 | --- | --- | --- | --- |
-| Legacy | `kLossAlgorithmLegacy = 0` | 100 个 `IIRFilter` Notch 串联，Q 全段共用 `lossNotchQ` | 计算最轻；低段带宽偏窄、高段偏宽 |
-| Uniform Bandwidth | `kLossAlgorithmUniformBandwidth = 1` | 每段 Notch 按频段边界推导 Q，令对数频谱上带宽等宽 | 全频带感受一致的"切除宽度" |
+| Legacy | `kLossAlgorithmLegacy = 0` | 100 个 `IIRFilter` Notch 串联，Q 全段共用 `lossNotchQ` | 计算最轻；低段带宽偏窄、高段偏宽；重触发时对"新变为丢弃"的 band `reset()` 以避免干路长期激励累积的内部状态尾巴 |
+| Uniform Bandwidth | `kLossAlgorithmUniformBandwidth = 1` | 每段 Notch 按频段边界推导 Q，令对数频谱上带宽等宽 | 全频带感受一致的"切除宽度"；与 Legacy 共用同一套 Notch 数组，重触发防病策略相同 |
 | FFT-Mask | `kLossAlgorithmFftMask = 2` | STFT（N=2048, hop=512, 75% overlap, Hann 窗）+ 逐 bin 乘目标增益 `g(k)=1−wet(band(k))` + IFFT + OLA（∑w² 归一化） | 频域直接"抠掉"命中频段，相位保留；额外引入 `N−hop=1536` 采样延迟（DAW 会自动补偿） |
 
 **FFT-Mask 关键实现要点**：
@@ -263,6 +263,7 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | --- | --- | --- | --- | --- |
 | 2026-07-09 | 0.0.1 | 1.1.6 | v1.3.0 | 建立首版功能与交互索引文档 |
 | 2026-07-09 | 0.0.2 | 1.1.7 | v1.3.1 | 新增第 3 种 Loss 算法 **FFT-Mask**（`kLossAlgorithmFftMask=2`）：STFT+Hann+75% overlap+OLA，逐 bin 乘 `g = 1 − wet(band(k))` 保留相位；`ST/SAP` 遥控按钮改为三态循环（Legacy → UniformBW → FFT-Mask → Legacy），左上模式 OSD 支持 `ST/SAP: LEGACY Q / UNIFORM BW / FFT MASK` 三种文案；FFT 模式下 `setLatencySamples(N−hop)=1536`，切回 IIR 模式清 0 |
+| 2026-07-09 | 0.0.3 | 1.1.8 | v1.3.1 | 修复 **Legacy / UniformBandwidth 两种 IIR 丢频算法在重触发时产生的"电流声 / 咕嗒声"**：引入 `previousLossMask` 快照，在 `retriggerLossMask` 末尾对"上一帧为保留 (1) 但当帧变为丢弃 (0)"的每一个 band 执行 `lossBandNotchL/R[b].reset()` + `lossBandWet[b] = 0.0f`，强制从零初始状态拉起；同时把 `kLossMaskSmoothingTimeSeconds` 从 10ms 拉长到 25ms，为低频段 Notch 留出建立稳态的时间；FFT-Mask 分支无 IIR 内部状态，不受影响 |
 
 ### 7.2 踩坑记录
 
@@ -276,6 +277,10 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | DSP | 带外 bin 若被误参与掩码，会削掉整段高频尾巴 | 对 `hz < 20Hz` 或 `hz > 20kHz` 的 bin 强制保持 unity；DC bin 也恒 unity | 0.0.2 |
 | DSP | JUCE `dsp::FFT::performRealOnlyForwardTransform` 的实数打包容易漏 Nyquist | 特殊处理 bin0（存于 `fftWork[0]`）和 binN/2（存于 `fftWork[1]`），中间 bin 才是交错复数 | 0.0.2 |
 | DSP | 直接把 IFFT 输出加合成窗后累加会产生轻微幅度起伏 | OLA 累加同时累加 `∑w²`，输出时按 `y / (∑w² + ε)` 归一化，避免 75% overlap 下的 3× 增益偏移 | 0.0.2 |
+| DSP | Legacy / UniformBandwidth 每次重触发时都有一下明显的"电流声"（FFT-Mask 无此现象） | 根因：`juce::IIRFilter` 是 direct-form 二阶结构，内部延迟状态 v1/v2 无论 wet 是否为 0 都在被 x 持续激励；长时间处于 wet=0 的 band 内部已累积与信号能量相关的稳态数值，一旦 wet 0→1 就会接入滤波器瞬态尾巴，多 band 叠加即为"咕嗒"。解决：重触发时对 previous=1∧current=0 的 band 手动 `reset()` 并强制 `lossBandWet=0`，从归零的状态向 wet=1 平滑 | 0.0.3 |
+| DSP | wet 平滑 10ms 对低频段 Notch（群延迟本身就接近 10ms）“追不上"，即使 reset 也有残留尾巴 | 把 `kLossMaskSmoothingTimeSeconds` 从 0.010f 拉长到 0.025f（对扫频预设听感还不至于"发糊"） | 0.0.3 |
+| DSP | 如果对所有变化的 band 都 reset，会引入反方向（1→0）的二次咕嗒 | 仅对 previous=1∧current=0 （新变为丢弃）的方向做 reset；反方向 wet 从 1→0 接入量递减不会激发瞬态，且反方向 reset 会丢失滤波器自然收尾 | 0.0.3 |
+| 状态 | `prepareToPlay` / `releaseResources` 中若不同步 `previousLossMask` 初始化，首次 retrigger 会把全部 band 误判为"新丢弃" | 在两处都添加 `previousLossMask.fill(1)`，与 `lossMask.fill(1)` 对齐 | 0.0.3 |
 
 <!-- 后续每次开发结束后，在这里追加行。示例格式：
 | DSP | HPF/LPF 参数每帧微调导致电流感 | 引入 kCutCrossfadeRetuneHzEpsilon=18Hz 抖动阈值，避免频繁重启 crossfade | 0.0.x |

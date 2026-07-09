@@ -351,6 +351,10 @@ private:
     std::atomic<bool> cutDragActive { false };
 
     std::array<uint8_t, kLossBandCount> lossMask {};
+    // 上一次 lossMask 的快照：用于在 retriggerLossMask 内部识别
+    // "本次新变为丢弃"的频段，从而 reset 对应 Notch 的内部状态，
+    // 避免 IIR 分支从 wet=0 拉起时激发出稳态状态残留造成的电流声。
+    std::array<uint8_t, kLossBandCount> previousLossMask {};
 
     std::array<int, kLossBandCount> activeLossBands {};
     std::array<int, kLossBandCount> droppedLossBands {};
@@ -367,7 +371,9 @@ private:
     std::array<juce::IIRFilter, kCutFilterMaxStages> cutLowPassR {};
 
     std::array<float, kLossBandCount> lossBandWet {};
-    static constexpr float kLossMaskSmoothingTimeSeconds = 0.010f;
+    // wet 从 0 → 1 / 1 → 0 的时间常数。10ms 时低频段 Notch 尚未建立稳态就被拉起，
+    // 会漏出瞬态尾巴；25ms 足以让 100Hz 以上的 Notch 收敛，且不至于让"扫频式"节奏预设听起来发糊。
+    static constexpr float kLossMaskSmoothingTimeSeconds = 0.025f;
     float lossMaskSmoothCoeff = 1.0f;
 
     double currentSampleRateForLoss = 0.0;

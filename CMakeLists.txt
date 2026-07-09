@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(LDSJvst VERSION 1.0.0 LANGUAGES CXX)
+project(LDSJvst VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,7 +18,7 @@ add_subdirectory(grid_plugin)
 juce_add_plugin(
         LDSJvst
         PRODUCT_NAME "CRTloss"
-        VERSION 1.1.6
+VERSION 1.1.7
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Ldsj
         PLUGIN_CODE Ldsj

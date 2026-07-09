@@ -98,22 +98,25 @@ public:
     }
 
     // 频带丢失算法模式：
-    // 0 = Legacy（当前旧算法，固定Q）
-    // 1 = Uniform Bandwidth（按频带边界推导Q，使每段带宽更精确统一）
+    // 0 = Legacy（旧算法，全段固定Q的窄带 Notch）
+    // 1 = Uniform Bandwidth（按频带边界推导Q，使每段带宽在对数频谱上等宽）
+    // 2 = FFT-Mask（对每个 block 做 STFT，命中丢失掩码的频段在频域直接置零后 IFFT）
     static constexpr int kLossAlgorithmLegacy = 0;
     static constexpr int kLossAlgorithmUniformBandwidth = 1;
+    static constexpr int kLossAlgorithmFftMask = 2;
+    static constexpr int kLossAlgorithmModeCount = 3;
 
     int getLossAlgorithmMode() const noexcept { return lossAlgorithmMode.load(std::memory_order_relaxed); }
     void setLossAlgorithmMode(int mode) noexcept
     {
-        lossAlgorithmMode.store(juce::jlimit(kLossAlgorithmLegacy, kLossAlgorithmUniformBandwidth, mode),
+        lossAlgorithmMode.store(juce::jlimit(kLossAlgorithmLegacy, kLossAlgorithmFftMask, mode),
                                 std::memory_order_relaxed);
     }
+    // 三态循环：Legacy → UniformBandwidth → FFT-Mask → Legacy
     void toggleLossAlgorithmMode() noexcept
     {
-        setLossAlgorithmMode(getLossAlgorithmMode() == kLossAlgorithmLegacy
-                                 ? kLossAlgorithmUniformBandwidth
-                                 : kLossAlgorithmLegacy);
+        const int next = (getLossAlgorithmMode() + 1) % kLossAlgorithmModeCount;
+        setLossAlgorithmMode(next);
     }
 
     // 频带丢失掩码反转（MUTE）：true 时将“保留/丢失”含义翻转
@@ -265,6 +268,15 @@ private:
     static float getLossBandCenterHz(int bandIndex) noexcept;
     static bool isBpmSequencedPreset(int presetIndex) noexcept;
 
+    // ---- FFT-Mask 算法（Loss Algorithm Mode == kLossAlgorithmFftMask） ----
+    // STFT + Hann + 75% overlap + OLA。每 hop 采样触发一次 FFT/IFFT。
+    // 每个 FFT bin 根据 lossMask 映射到 100 对数频段的 wet 值，得到目标增益 (1 - wet)。
+    // 逐 bin 平滑后写回频域，IFFT 后经合成窗与 w^2 归一化累积到输出环形缓冲。
+    void rebuildStft(double sampleRate, int numChannels);
+    void resetStftState() noexcept;
+    void processStftFrame(int ch, const std::vector<float>& targetBinGains, float gainSmoothAlpha);
+    void processFftLossMode(juce::AudioBuffer<float>& buffer, bool lossMaskInvertedNow);
+
     struct SequencedPresetProfile
     {
         int anchorCount = 1;
@@ -297,6 +309,38 @@ private:
     std::atomic<float> limiterThreshold { 1.0f };
     std::atomic<float> lossNotchQ { 6.0f };
     std::atomic<int> lossAlgorithmMode { kLossAlgorithmLegacy };
+
+    // FFT-Mask 状态（每通道独立）
+    struct StftChannelState
+    {
+        std::unique_ptr<juce::dsp::FFT> fft;
+        std::vector<float> window;         // Hann 窗，长度 stftSize
+        std::vector<float> fftWork;        // 2*stftSize，JUCE real-only 交错存储
+
+        std::vector<float> inputRing;      // 输入环形缓冲，长度 stftSize
+        int                inputPos = 0;
+        int                accumCount = 0; // 距离上一帧的采样数
+
+        std::vector<float> dryDelayRing;   // 干路延迟 = N - hop
+        int                dryDelayWritePos = 0;
+
+        std::vector<float> outputRing;     // OLA 累加
+        std::vector<float> olaNormRing;    // ∑w^2 归一化权重
+
+        std::vector<float> outFifo;        // 输出 FIFO，长度 N*2
+        int                outFifoWrite = 0;
+        int                outFifoRead  = 0;
+        int                outFifoCount = 0;
+
+        int                frameCount = 0;
+        std::vector<float> smoothedGains; // 逐 bin 增益平滑状态
+    };
+
+    std::vector<StftChannelState> stftStates;
+    int stftSize = 2048;
+    int stftHop  = 512;
+    int stftLatencyReported = 0; // 上一次通过 setLatencySamples 汇报的延迟
+    int lastStftAlgorithmMode = -1;
     std::atomic<bool> lossMaskFrozen { false };
     std::atomic<bool> lossMaskInverted { false };
     std::atomic<float> lowCutHz { kLowCutHzMin };

@@ -168,6 +168,279 @@ void LDSJvstAudioProcessor::ensureLossFilters(double sampleRate)
     }
 }
 
+// ============================================================================
+// FFT-Mask 算法（Loss Algorithm Mode == kLossAlgorithmFftMask）
+// STFT + Hann + 75% overlap + OLA。
+// 参考 SpectrumTag 的 STFT 处理管线。
+// ============================================================================
+
+void LDSJvstAudioProcessor::rebuildStft(double sampleRate, int numChannels)
+{
+    juce::ignoreUnused(sampleRate);
+
+    const int N = juce::jmax(64, stftSize);
+    const int hop = juce::jmax(1, N / 4);
+    const int numBins = N / 2 + 1;
+
+    stftSize = N;
+    stftHop  = hop;
+    stftStates.clear();
+    stftStates.resize((size_t) juce::jmax(1, numChannels));
+
+    std::vector<float> hann((size_t) N);
+    for (int n = 0; n < N; ++n)
+        hann[(size_t) n] = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi
+                                                    * (float) n / (float) juce::jmax(1, N - 1)));
+
+    const int order = (int) std::round(std::log2((double) N));
+
+    for (int ch = 0; ch < (int) stftStates.size(); ++ch)
+    {
+        auto& st = stftStates[(size_t) ch];
+        st.fft = std::make_unique<juce::dsp::FFT>(order);
+        st.window = hann;
+        st.fftWork.assign((size_t) (2 * N), 0.0f);
+        st.inputRing.assign((size_t) N, 0.0f);
+        st.dryDelayRing.assign((size_t) N, 0.0f);
+        st.outputRing.assign((size_t) N, 0.0f);
+        st.olaNormRing.assign((size_t) N, 0.0f);
+        st.smoothedGains.assign((size_t) numBins, 1.0f);
+        st.outFifo.assign((size_t) (N * 2), 0.0f);
+        st.inputPos = 0;
+        st.accumCount = 0;
+        st.frameCount = 0;
+        st.dryDelayWritePos = 0;
+        st.outFifoWrite = 0;
+        st.outFifoRead = 0;
+        st.outFifoCount = 0;
+    }
+}
+
+void LDSJvstAudioProcessor::resetStftState() noexcept
+{
+    for (auto& st : stftStates)
+    {
+        std::fill(st.inputRing.begin(),    st.inputRing.end(),    0.0f);
+        std::fill(st.dryDelayRing.begin(), st.dryDelayRing.end(), 0.0f);
+        std::fill(st.outputRing.begin(),   st.outputRing.end(),   0.0f);
+        std::fill(st.olaNormRing.begin(),  st.olaNormRing.end(),  0.0f);
+        std::fill(st.outFifo.begin(),      st.outFifo.end(),      0.0f);
+        std::fill(st.smoothedGains.begin(),st.smoothedGains.end(),1.0f);
+        st.inputPos = 0;
+        st.accumCount = 0;
+        st.frameCount = 0;
+        st.dryDelayWritePos = 0;
+        st.outFifoWrite = 0;
+        st.outFifoRead = 0;
+        st.outFifoCount = 0;
+    }
+}
+
+// 单帧 STFT 处理：从 inputRing 取最新 N 个采样加窗 → FFT → 逐 bin 乘增益（相位保留）
+// → IFFT → 加合成窗 OLA 到 outputRing → 用 ∑w² 归一化后写入输出 FIFO。
+void LDSJvstAudioProcessor::processStftFrame(int ch,
+                                             const std::vector<float>& targetBinGains,
+                                             float gainSmoothAlpha)
+{
+    if (ch < 0 || ch >= (int) stftStates.size())
+        return;
+
+    auto& st = stftStates[(size_t) ch];
+    if (st.fft == nullptr)
+        return;
+
+    const int N = stftSize;
+    const int hop = stftHop;
+    const int numBins = N / 2 + 1;
+
+    // Step 1) 加窗取 N 个最新采样。inputPos 指向"下一个写入位置"，因此最老采样从 inputPos 开始（环形）
+    const int frameStart = st.inputPos;
+    for (int n = 0; n < N; ++n)
+    {
+        const int idx = (frameStart + n) % N;
+        st.fftWork[(size_t) n] = st.inputRing[(size_t) idx] * st.window[(size_t) n];
+    }
+    std::fill(st.fftWork.begin() + N, st.fftWork.end(), 0.0f);
+
+    // Step 2) 实数 FFT
+    st.fft->performRealOnlyForwardTransform(st.fftWork.data());
+
+    // Step 3) 逐 bin 应用平滑增益（保留相位）
+    // JUCE real-only 打包：bin0=fftWork[0]，binN/2=fftWork[1]，bin1..N/2-1=fftWork[2k]/[2k+1]
+    {
+        const float target = targetBinGains[0];
+        float& smooth = st.smoothedGains[0];
+        smooth += (target - smooth) * gainSmoothAlpha;
+        st.fftWork[0] *= smooth;
+    }
+    for (int k = 1; k < numBins - 1; ++k)
+    {
+        const float target = targetBinGains[(size_t) k];
+        float& smooth = st.smoothedGains[(size_t) k];
+        smooth += (target - smooth) * gainSmoothAlpha;
+        st.fftWork[(size_t) (2 * k)]     *= smooth;
+        st.fftWork[(size_t) (2 * k + 1)] *= smooth;
+    }
+    {
+        const int kNyq = numBins - 1;
+        const float target = targetBinGains[(size_t) kNyq];
+        float& smooth = st.smoothedGains[(size_t) kNyq];
+        smooth += (target - smooth) * gainSmoothAlpha;
+        st.fftWork[1] *= smooth;
+    }
+
+    // Step 4) 实数 IFFT（JUCE 内部会除以 N）
+    st.fft->performRealOnlyInverseTransform(st.fftWork.data());
+
+    // Step 5) 加合成窗 OLA 累加，同时累积 w² 用于逐样本归一化
+    for (int n = 0; n < N; ++n)
+    {
+        const int outIdx = (frameStart + n) % N;
+        const float w = st.window[(size_t) n];
+        st.outputRing[(size_t) outIdx]  += st.fftWork[(size_t) n] * w;
+        st.olaNormRing[(size_t) outIdx] += w * w;
+    }
+
+    // Step 6) 预热完成后每帧推 hop 个稳态归一化样本到 FIFO
+    ++st.frameCount;
+    if (st.frameCount >= N / hop)
+    {
+        const int fifoStart = frameStart;
+        constexpr float kNormEps = 1.0e-8f;
+        for (int i = 0; i < hop; ++i)
+        {
+            const int pos = (fifoStart + i) % N;
+            const float norm = st.olaNormRing[(size_t) pos];
+            const float y = (norm > kNormEps)
+                ? (st.outputRing[(size_t) pos] / norm)
+                : st.outputRing[(size_t) pos];
+
+            st.outFifo[(size_t) st.outFifoWrite] = y;
+            st.outputRing[(size_t) pos]   = 0.0f;
+            st.olaNormRing[(size_t) pos]  = 0.0f;
+            st.outFifoWrite = (st.outFifoWrite + 1) % (int) st.outFifo.size();
+            ++st.outFifoCount;
+        }
+    }
+}
+
+// 将频段掩码映射到 FFT bin 后驱动 STFT。lossMaskInvertedNow 已在调用方按业务语义解析。
+void LDSJvstAudioProcessor::processFftLossMode(juce::AudioBuffer<float>& buffer,
+                                               bool lossMaskInvertedNow)
+{
+    if (stftStates.empty())
+        return;
+
+    const int numCh = juce::jmin(buffer.getNumChannels(), (int) stftStates.size());
+    const int numSamps = buffer.getNumSamples();
+    if (numCh <= 0 || numSamps <= 0)
+        return;
+
+    const double sr = juce::jmax(1.0, getSampleRate());
+    const int N = stftSize;
+    const int hop = stftHop;
+    const int numBins = N / 2 + 1;
+
+    // 增益平滑：10ms 时间常数，与 SpectrumTag 一致
+    const float frameSeconds = (float) hop / (float) sr;
+    const float smoothAlpha  = 1.0f - std::exp(- frameSeconds / 0.010f);
+
+    // 干湿延迟对齐：N - hop = 3N/4
+    const int dryDelaySamples = juce::jlimit(0, N - 1, N - hop);
+
+    std::vector<float> targetBinGains((size_t) numBins, 1.0f);
+
+    // ------------------------------------------------------------------
+    //  预先根据 lossBandWet[100] 计算 targetBinGains[numBins]：
+    //    对每个 FFT bin，取其中心频率 hz = k * sr / N，
+    //    通过对数映射到 100 个频段中的某一个，读取 lossBandWet[band] 作为丢失强度。
+    //    lossMaskInverted 已经在 processBlock 中融合进 lossBandWet 的目标值。
+    //    目标增益 g = 1 - wet。
+    //  低于 20Hz 或高于 20kHz 的 bin 不做处理（保持 unity）。
+    //  低于最低段中心的低频保护 & 高于最高段中心的高频保护同理处理为 unity。
+    // ------------------------------------------------------------------
+    juce::ignoreUnused(lossMaskInvertedNow); // 反转已通过 lossBandWet 表达
+    constexpr float kBandLo = 20.0f;
+    constexpr float kBandHi = 20000.0f;
+    const float logRatio = std::log(kBandHi / kBandLo);
+
+    targetBinGains[0] = 1.0f; // DC 恒 unity
+    for (int k = 1; k < numBins; ++k)
+    {
+        const float hz = (float) k * (float) sr / (float) N;
+        if (hz < kBandLo || hz > kBandHi)
+        {
+            targetBinGains[(size_t) k] = 1.0f;
+            continue;
+        }
+
+        // 对数映射：与 getLossBandCenterHz 相反的映射
+        const float t = std::log(hz / kBandLo) / logRatio; // 0..1
+        int band = (int) std::round(t * (float) (kLossBandCount - 1));
+        band = juce::jlimit(0, kLossBandCount - 1, band);
+
+        const float wet = lossBandWet[(size_t) band];
+        const float g = 1.0f - juce::jlimit(0.0f, 1.0f, wet);
+        targetBinGains[(size_t) k] = g;
+    }
+
+    // ------------------------------------------------------------------
+    //  Sample-major 主循环：每个采样点分通道写入 inputRing / dryDelayRing，
+    //  累计到 hop 后触发一帧 STFT。同时输出侧从 FIFO 取一个采样写回 buffer；
+    //  FIFO 未就绪（预热期）则以延迟对齐的 dry 样本兜底，保证零 pop。
+    // ------------------------------------------------------------------
+    for (int n = 0; n < numSamps; ++n)
+    {
+        bool frameReady = false;
+
+        for (int ch = 0; ch < numCh; ++ch)
+        {
+            auto& st = stftStates[(size_t) ch];
+            const float inSample = buffer.getReadPointer(ch)[n];
+
+            st.inputRing[(size_t) st.inputPos] = inSample;
+            st.inputPos = (st.inputPos + 1) % N;
+
+            const int dryWritePos = st.dryDelayWritePos;
+            st.dryDelayRing[(size_t) dryWritePos] = inSample;
+            st.dryDelayWritePos = (dryWritePos + 1) % N;
+
+            ++st.accumCount;
+            if (st.accumCount >= hop)
+                frameReady = true;
+        }
+
+        if (frameReady)
+        {
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                auto& st = stftStates[(size_t) ch];
+                st.accumCount -= hop;
+                processStftFrame(ch, targetBinGains, smoothAlpha);
+            }
+        }
+
+        // 输出：FIFO 就绪则取 wet，否则取延迟 dry（预热期）。
+        for (int ch = 0; ch < numCh; ++ch)
+        {
+            auto& st = stftStates[(size_t) ch];
+
+            const int dryReadPos = (st.dryDelayWritePos + N - dryDelaySamples) % N;
+            const float delayedDry = st.dryDelayRing[(size_t) dryReadPos];
+
+            float out = delayedDry;
+            if (st.outFifoCount > 0)
+            {
+                out = st.outFifo[(size_t) st.outFifoRead];
+                st.outFifoRead = (st.outFifoRead + 1) % (int) st.outFifo.size();
+                --st.outFifoCount;
+            }
+
+            buffer.getWritePointer(ch)[n] = out;
+        }
+    }
+}
+
 void LDSJvstAudioProcessor::ensureCutFilters(double sampleRate)
 {
     if (sampleRate <= 0.0)
@@ -455,6 +728,18 @@ void LDSJvstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
 
     retriggerLossMask(lossTimeSeconds);
 
+    // FFT-Mask 分支的 STFT/OLA 状态：按当前通道数重建，并按算法模式上报插件延迟。
+    // 只有在 FFT 模式下才上报非零延迟，避免 IIR 分支强行引入 3N/4 采样的 latency。
+    const int fftNumCh = juce::jmax(getTotalNumInputChannels(), getTotalNumOutputChannels());
+    rebuildStft(sampleRate, juce::jmax(1, fftNumCh));
+    resetStftState();
+
+    const int algoNow = getLossAlgorithmMode();
+    const int desiredLatency = (algoNow == kLossAlgorithmFftMask) ? juce::jmax(0, stftSize - stftHop) : 0;
+    setLatencySamples(desiredLatency);
+    stftLatencyReported = desiredLatency;
+    lastStftAlgorithmMode = algoNow;
+
 }
 
 void LDSJvstAudioProcessor::releaseResources()
@@ -482,6 +767,25 @@ void LDSJvstAudioProcessor::releaseResources()
     lossMask.fill(1);
 
     lossBandWet.fill(0.0f);
+
+    // FFT-Mask 状态清理：避免宿主复位/挂起阶段 stftStates 引用悬空内存
+    for (auto& st : stftStates)
+    {
+        std::fill(st.inputRing.begin(),    st.inputRing.end(),    0.0f);
+        std::fill(st.dryDelayRing.begin(), st.dryDelayRing.end(), 0.0f);
+        std::fill(st.outputRing.begin(),   st.outputRing.end(),   0.0f);
+        std::fill(st.olaNormRing.begin(),  st.olaNormRing.end(),  0.0f);
+        std::fill(st.outFifo.begin(),      st.outFifo.end(),      0.0f);
+        std::fill(st.smoothedGains.begin(),st.smoothedGains.end(),1.0f);
+        st.inputPos = 0;
+        st.accumCount = 0;
+        st.frameCount = 0;
+        st.dryDelayWritePos = 0;
+        st.outFifoWrite = 0;
+        st.outFifoRead = 0;
+        st.outFifoCount = 0;
+    }
+    lastStftAlgorithmMode = -1;
 
     const juce::SpinLock::ScopedTryLockType maskLock(lossMaskSnapshotLock);
     if (maskLock.isLocked())
@@ -727,14 +1031,37 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     }
 
     const bool lossMaskInvertedNow = (lossMaskInvertedNowForMask != 0);
+    const int algorithmModeNow = juce::jlimit(kLossAlgorithmLegacy,
+                                              kLossAlgorithmFftMask,
+                                              getLossAlgorithmMode());
 
-    auto* left  = (totalNumOutputChannels > 0) ? buffer.getWritePointer(0) : nullptr;
+    // 算法模式变化时重置 STFT 状态，避免残留数据造成一次性 pop
+    if (algorithmModeNow != lastStftAlgorithmMode)
+    {
+        if (algorithmModeNow == kLossAlgorithmFftMask)
+        {
+            const int desiredLatency = juce::jmax(0, stftSize - stftHop);
+            if (desiredLatency != stftLatencyReported)
+            {
+                setLatencySamples(desiredLatency);
+                stftLatencyReported = desiredLatency;
+            }
+            resetStftState();
+        }
+        else
+        {
+            if (stftLatencyReported != 0)
+            {
+                setLatencySamples(0);
+                stftLatencyReported = 0;
+            }
+        }
+        lastStftAlgorithmMode = algorithmModeNow;
+    }
 
-    auto* right = (totalNumOutputChannels > 1) ? buffer.getWritePointer(1) : nullptr;
-
+    // 无论使用哪种算法，都要按 10ms 时间常数平滑 lossBandWet（wet=1 表示丢失）
     for (int i = 0; i < buffer.getNumSamples(); ++i)
     {
-        // 先统一更新本 sample 的频段 wet（与声道无关），再分别处理左右声道
         for (int b = 0; b < kLossBandCount; ++b)
         {
             const bool droppedByMask = (lossMask[(size_t) b] == 0);
@@ -744,29 +1071,46 @@ void LDSJvstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             const float wet = targetWet + (prevWet - targetWet) * lossMaskSmoothCoeff;
             lossBandWet[(size_t) b] = wet;
         }
+        // 注：为保持与 IIR 分支一致，wet 每 sample 都推进一次（哪怕 FFT 分支在 processFftLossMode
+        // 中只在 hop 边界读取一次，也需要让 wet 收敛到当前 mask 目标）。
+    }
 
-        if (left != nullptr)
-        {
-            float x = left[i];
-            for (int b = 0; b < kLossBandCount; ++b)
-            {
-                const float wet = lossBandWet[(size_t) b];
-                const float y = lossBandNotchL[(size_t) b].processSingleSampleRaw(x);
-                x = x + wet * (y - x);
-            }
-            left[i] = x;
-        }
+    if (algorithmModeNow == kLossAlgorithmFftMask)
+    {
+        // FFT 分支：直接在 STFT/OLA 中完成频段掩码，跳过 IIR notch
+        processFftLossMode(buffer, lossMaskInvertedNow);
+    }
+    else
+    {
+        // 传统 IIR notch 分支（Legacy / Uniform Bandwidth）
+        auto* left  = (totalNumOutputChannels > 0) ? buffer.getWritePointer(0) : nullptr;
+        auto* right = (totalNumOutputChannels > 1) ? buffer.getWritePointer(1) : nullptr;
 
-        if (right != nullptr)
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
         {
-            float x = right[i];
-            for (int b = 0; b < kLossBandCount; ++b)
+            if (left != nullptr)
             {
-                const float wet = lossBandWet[(size_t) b];
-                const float y = lossBandNotchR[(size_t) b].processSingleSampleRaw(x);
-                x = x + wet * (y - x);
+                float x = left[i];
+                for (int b = 0; b < kLossBandCount; ++b)
+                {
+                    const float wet = lossBandWet[(size_t) b];
+                    const float y = lossBandNotchL[(size_t) b].processSingleSampleRaw(x);
+                    x = x + wet * (y - x);
+                }
+                left[i] = x;
             }
-            right[i] = x;
+
+            if (right != nullptr)
+            {
+                float x = right[i];
+                for (int b = 0; b < kLossBandCount; ++b)
+                {
+                    const float wet = lossBandWet[(size_t) b];
+                    const float y = lossBandNotchR[(size_t) b].processSingleSampleRaw(x);
+                    x = x + wet * (y - x);
+                }
+                right[i] = x;
+            }
         }
     }
 

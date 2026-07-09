@@ -6,7 +6,7 @@
 
 namespace
 {
-    static constexpr auto kPluginUiVersionText = "v1.3.0";
+static constexpr auto kPluginUiVersionText = "v1.3.1";
 
     enum class TvPanelButtonAction
     {
@@ -1735,9 +1735,20 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
             const float fade = 1.0f - juce::jlimit(0.0f, 1.0f, (modeT - 0.80f) / 0.20f);
 
             const int algoMode = owner.processor.getLossAlgorithmMode();
-            const juce::String algoText = (algoMode == LDSJvstAudioProcessor::kLossAlgorithmUniformBandwidth)
-                                            ? "ST/SAP: UNIFORM BW"
-                                            : "ST/SAP: LEGACY Q";
+            juce::String algoText;
+            switch (algoMode)
+            {
+                case LDSJvstAudioProcessor::kLossAlgorithmUniformBandwidth:
+                    algoText = "ST/SAP: UNIFORM BW";
+                    break;
+                case LDSJvstAudioProcessor::kLossAlgorithmFftMask:
+                    algoText = "ST/SAP: FFT MASK";
+                    break;
+                case LDSJvstAudioProcessor::kLossAlgorithmLegacy:
+                default:
+                    algoText = "ST/SAP: LEGACY Q";
+                    break;
+            }
 
             const int cutMode = owner.processor.getCutMode();
             const int cutSlopeDb = owner.processor.getCutSlopeDbPerOct();

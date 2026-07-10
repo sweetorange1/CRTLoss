@@ -1,5 +1,5 @@
 #define MyAppName "CRTloss"
-#define MyAppVersion "1.1.6"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyPluginBundle "CRTloss.vst3"
 
@@ -27,7 +27,9 @@ DisableDirPage=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "cmake-build-release\LDSJvst_artefacts\Release\VST3\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Release 构建产物目录（对应 CLion Release profile: cmake-build-release-visual-studio）
+; 需先在 CLion 中以 Release 配置构建 LDSJvst_VST3 目标
+Source: "cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Code]
 var

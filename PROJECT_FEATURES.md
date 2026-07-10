@@ -9,7 +9,7 @@
 - **插件格式**：VST3 + Standalone
 - **CMake 版本号**（`CMakeLists.txt` 中 `juce_add_plugin` 的 `VERSION`）：`1.1.9`
 - **UI 版本号**（`PluginEditor.cpp` 中 `kPluginUiVersionText`）：`v1.4.0`
-- **文档版本**：`0.0.4`
+- **文档版本**：`0.0.5`
 
 ---
 
@@ -265,6 +265,7 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | 2026-07-09 | 0.0.2 | 1.1.7 | v1.3.1 | 新增第 3 种 Loss 算法 **FFT-Mask**（`kLossAlgorithmFftMask=2`）：STFT+Hann+75% overlap+OLA，逐 bin 乘 `g = 1 − wet(band(k))` 保留相位；`ST/SAP` 遥控按钮改为三态循环（Legacy → UniformBW → FFT-Mask → Legacy），左上模式 OSD 支持 `ST/SAP: LEGACY Q / UNIFORM BW / FFT MASK` 三种文案；FFT 模式下 `setLatencySamples(N−hop)=1536`，切回 IIR 模式清 0 |
 | 2026-07-09 | 0.0.3 | 1.1.8 | v1.3.1 | 修复 **Legacy / UniformBandwidth 两种 IIR 丢频算法在重触发时产生的"电流声 / 咕嗒声"**：引入 `previousLossMask` 快照，在 `retriggerLossMask` 末尾对"上一帧为保留 (1) 但当帧变为丢弃 (0)"的每一个 band 执行 `lossBandNotchL/R[b].reset()` + `lossBandWet[b] = 0.0f`，强制从零初始状态拉起；同时把 `kLossMaskSmoothingTimeSeconds` 从 10ms 拉长到 25ms，为低频段 Notch 留出建立稳态的时间；FFT-Mask 分支无 IIR 内部状态，不受影响 |
 | 2026-07-10 | 0.0.4 | 1.1.9 | v1.4.0 | **调整固定预设 0..11 的顺序**：`display_present::kPresets` 循环左移一位（旧 1..11 → 新 0..10，旧 0 → 新 11），且开机默认停留在新预设 0（原预设 1）。同时在 `PluginEditor.cpp::OscilloscopeComponent::paint()` 中把 `stylePreset` 的"固定频道路径"从 `= preset` 改为 `= mapToLegacyStyleIndex(preset)`（新 0..10→旧 1..11，新 11→旧 0），并把 `getWaveBaseColour()` 内的 `switch (preset)` 改为 `switch (stylePreset)`。使得**波形颜色 / 波形绘制样式 / glitch 撕裂效果**这三块硬编码视觉分支跟随数据一起从旧位置搬到新位置——数据（背景、扫描线扭曲、丢频算法、高低切）与外观（波形颜色、绘制样式、glitch）完全同步 |
+| 2026-07-10 | 0.0.5 | 1.1.9 | v1.4.0 | **修复 Windows 安装包打包脚本**：把 [build_installer.bat](build_installer.bat) 精简为纯「校验 Release 产物 → 定位 ISCC → 调用 ISCC」三步，彻底移除内嵌的 CMake configure / vcvars / Ninja 逻辑，避免脚本自作主张地重新配置构建目录。[CRTloss_installer.iss](CRTloss_installer.iss) 的 `[Files] Source` 由错误的 `cmake-build-release-installer\...` 改回 CLion Release profile 的真实产物目录 `cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3\*`；同时把 `MyAppVersion` 从遗留的 `1.1.9`（笔误，本应是安装包版本而非 CMake 版本）与 UI 主版本对齐为 `1.4.0`，安装包文件名规范化为 `CRTloss_Setup_1.4.0_x64.exe` |
 
 ### 7.2 踩坑记录
 
@@ -286,6 +287,9 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | UI | 直接把 3 处 switch 全部按新顺序重排 case 分支的替代方案被否 | 改动面过大、极易破坏 case 3 的彩虹波形/OSD 手柄特判以及 `stylePreset`-related 的数值算式（如 `burstPeriod = 150 + stylePreset*17`），风险远高于收益。用重映射封装是最小改动且行为等价的方案 | 0.0.4 |
 | UI | 衍生频道 (channel ≥ 12) 也可能被误映射 | `mapToLegacyStyleIndex` 显式判断 `p < 0 || p >= kPresetCount` 时返回原值；且衍生频道走的是 `1 + (preset*7+5) % (kPresetCount-1)` 分支，本身就已经落在旧序号语义下，无需再映射 | 0.0.4 |
 | 兼容 | 旧工程加载后，保存的 `preset` 索引会指向新排序中的对应位置，听感与保存时不一致 | 已知取舍，属于"预设顺序调整"这类破坏性变更的正常后果；派生频道 (12..9999) 因基准索引 `cid % kPresetCount` 变化，声音也会与之前不同 | 0.0.4 |
+| 打包 | 之前给 bat 加了「自动 CMake configure + build Release」逻辑，反复报 `Running 'nmake' '-?' failed`、`No files found matching ...\Release\VST3\*` | 根因：脚本对 CLion 自身的 profile 目录做二次 configure 时用了不匹配的 Generator（默认拿到了 NMake），且 CLion 在 IDE 内并未真正跑过 Release build，导致产物目录只有壳没有二进制。结论：**打包脚本不应触碰编译**，编译由 CLion 负责；bat 只做产物校验和调 ISCC。任何 iss 里的 Source 路径必须对齐 CLion 实际生成目录 `cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3` | 0.0.5 |
+| 打包 | iss 的 `MyAppVersion` 长期停留在 `1.1.9`，与 UI 显示的 `v1.4.0` 严重错位，安装包文件名误导 | 明确约定：`MyAppVersion` 跟随「用户可感知的主版本」（也就是 `kPluginUiVersionText` 去掉前缀 `v` 后的值），CMake `VERSION` 是插件内部构建号，两者不必强绑定但 iss 必须与 UI 主版本对齐 | 0.0.5 |
+| 流程 | 反复在 bat 里"多做一点"结果一次比一次糟 | 教训：bat 打包脚本严格遵循 KISS —— 只做「校验 → 定位 ISCC → 调 ISCC」三步；编译、目录切换、Generator 选择、vcvars 全部交给 CLion / 开发者手动完成。任何试图在 bat 里"顺便帮用户构建"的行为，长期看都会带来更多环境相关的失败案例 | 0.0.5 |
 
 <!-- 后续每次开发结束后，在这里追加行。示例格式：
 | DSP | HPF/LPF 参数每帧微调导致电流感 | 引入 kCutCrossfadeRetuneHzEpsilon=18Hz 抖动阈值，避免频繁重启 crossfade | 0.0.x |

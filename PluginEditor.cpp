@@ -6,7 +6,7 @@
 
 namespace
 {
-static constexpr auto kPluginUiVersionText = "v1.4.0";
+static constexpr auto kPluginUiVersionText = "v1.4.4";
 
     enum class TvPanelButtonAction
     {
@@ -225,6 +225,7 @@ LDSJvstAudioProcessorEditor::OscilloscopeComponent::OscilloscopeComponent(LDSJvs
     : owner(o), processor(p)
 {
     setInterceptsMouseClicks(true, false);
+    setBufferedToImage(true);
     startTimerHz(30);
 }
 
@@ -236,6 +237,49 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::timerCallback()
         return;
     }
 
+    // ==== 自适应帧率：用毫秒精度测量帧间隔 ====
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+
+    if (lastTimerCallbackMs > 0.0)
+    {
+        const double elapsedMs = nowMs - lastTimerCallbackMs;
+        const double budgetMs = (currentTimerHz > 0) ? (1000.0 / currentTimerHz) : 33.33;
+
+        if (elapsedMs > budgetMs * 1.15)        // 帧耗时超过预算 115%
+        {
+            ++consecutiveOverBudget;
+            consecutiveUnderBudget = 0;
+            if (consecutiveOverBudget >= 4)      // 连续 4 帧超标 → 降一档
+            {
+                consecutiveOverBudget = 0;
+                int nextHz = currentTimerHz;
+                if      (currentTimerHz > 24) nextHz = 24;
+                else if (currentTimerHz > 18) nextHz = 18;
+                else if (currentTimerHz > 12) nextHz = 12;
+                else                          nextHz = 10;
+                if (nextHz != currentTimerHz) { currentTimerHz = nextHz; startTimerHz(currentTimerHz); }
+            }
+        }
+        else if (elapsedMs < budgetMs * 0.50)    // 帧耗时不到预算 50%
+        {
+            ++consecutiveUnderBudget;
+            consecutiveOverBudget = 0;
+            if (consecutiveUnderBudget >= 30)    // 连续 30 帧富裕 → 升一档
+            {
+                consecutiveUnderBudget = 0;
+                int nextHz = currentTimerHz;
+                if      (currentTimerHz < 15) nextHz = 15;
+                else if (currentTimerHz < 20) nextHz = 20;
+                else if (currentTimerHz < 25) nextHz = 25;
+                else if (currentTimerHz < 30) nextHz = 30;
+                if (nextHz != currentTimerHz) { currentTimerHz = nextHz; startTimerHz(currentTimerHz); }
+            }
+        }
+        else { consecutiveOverBudget = 0; consecutiveUnderBudget = 0; }
+    }
+    lastTimerCallbackMs = nowMs;
+
+    // ==== 数据获取 ====
     processor.getOscilloscopeSnapshot(samples);
     processor.getLossMaskSnapshot(lossMaskSnapshotUI);
     repaint();
@@ -955,13 +999,53 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         return juce::Point<float>(x, y);
     };
 
-    if (! bypassActive)
+    // === 波形 Path 构建：性能优化 ===
+    // 优化 1（静音短路）：整帧样本能量为 0 时，直接画一条水平直线（只 2 个点），
+    //   彻底绕开 2048 段 Path 的描边光栅化。macOS 下 CoreGraphics 对复杂 Path 的
+    //   同步阻塞是"无音频 CPU 高但流畅、有音频 CPU 低反而卡"的物理成因。
+    // 优化 2（下采样）：正常波形取 targetPoints ≈ 300 个点参与描边（屏幕宽度
+    //   的 ~0.5 倍）。原本 2048 个样本挤进 606 像素（每像素 3.4 个点）在视觉上
+    //   完全冗余，但会让 CoreGraphics 为每段独立做子像素累加。下采样后段数减
+    //   少 ~7×，直接消除主要瓶颈。
+    bool waveformIsSilent = true;
+    if (n > 0)
     {
+        constexpr float kSilenceEps = 1.0e-4f;
         for (int i = 0; i < n; ++i)
         {
-            const auto p = sampleToPoint(i);
-            if (i == 0) waveform.startNewSubPath(p.x, p.y);
-            else        waveform.lineTo(p.x, p.y);
+            if (std::abs(samples.getUnchecked(i)) > kSilenceEps)
+            {
+                waveformIsSilent = false;
+                break;
+            }
+        }
+    }
+
+    if (! bypassActive && n > 0)
+    {
+        if (waveformIsSilent)
+        {
+            waveform.startNewSubPath(sb.getX(), midY);
+            waveform.lineTo(sb.getRight(), midY);
+        }
+        else
+        {
+            constexpr int kTargetWavePoints = 300;
+            const int stride = juce::jmax(1, n / kTargetWavePoints);
+
+            bool started = false;
+            for (int i = 0; i < n; i += stride)
+            {
+                const auto p = sampleToPoint(i);
+                if (! started) { waveform.startNewSubPath(p.x, p.y); started = true; }
+                else            waveform.lineTo(p.x, p.y);
+            }
+            // 确保覆盖到最后一个样本，避免右侧留出空段
+            if (started && ((n - 1) % stride) != 0)
+            {
+                const auto pLast = sampleToPoint(n - 1);
+                waveform.lineTo(pLast.x, pLast.y);
+            }
         }
     }
 
@@ -971,7 +1055,25 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
         gg.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);
         gg.fillAll(juce::Colours::transparentBlack);
 
-        drawBackground(gg);
+        // 背景缓存：大部分预设的背景是静态或极慢速动画，缓存后每帧只需绘制一张图片
+        const bool bgChanged = (cachedBgPreset != preset
+                                || cachedBackground.getWidth() != W
+                                || cachedBackground.getHeight() != H);
+
+        if (bgChanged)
+        {
+            cachedBgPreset = preset;
+            cachedBackground = juce::Image(juce::Image::ARGB, W, H, true);
+            juce::Graphics bgG(cachedBackground);
+            bgG.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);
+            bgG.fillAll(juce::Colours::transparentBlack);
+            drawBackground(bgG);
+        }
+
+        gg.drawImage(cachedBackground,
+                     sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
+                     0, 0, cachedBackground.getWidth(), cachedBackground.getHeight(),
+                     false);
 
         // 预设 0：像素电视雪花（这块仍然用原来的逐像素生成方式）
         if (stylePreset == 0 && ! bypassActive)
@@ -1049,10 +1151,10 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     const auto c = waveGlowColour;
 
                     gg.setColour(c.withAlpha(0.18f));
-                    gg.strokePath(waveform, juce::PathStrokeType(6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(6.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     gg.setColour(c.withAlpha(0.95f));
-                    gg.strokePath(waveform, juce::PathStrokeType(2.3f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.3f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     break;
                 }
 
@@ -1064,15 +1166,15 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     juce::Path trail = waveform;
                     trail.applyTransform(juce::AffineTransform::translation(0.0f, 1.0f));
                     gg.setColour(amber.withAlpha(0.14f));
-                    gg.strokePath(trail, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(trail, juce::PathStrokeType(5.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     trail = waveform;
                     trail.applyTransform(juce::AffineTransform::translation(0.0f, -1.0f));
                     gg.setColour(amber.withAlpha(0.10f));
-                    gg.strokePath(trail, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(trail, juce::PathStrokeType(5.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     gg.setColour(amber.withAlpha(1.0f));
-                    gg.strokePath(waveform, juce::PathStrokeType(2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.6f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     break;
                 }
                 case 3:
@@ -1115,7 +1217,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                         p.applyTransform(juce::AffineTransform::translation((float) shiftPx, 0.0f));
 
                         gg.setColour(baseTrail.withMultipliedBrightness(brightnessMul).withAlpha(alpha));
-                        gg.strokePath(p, juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                        gg.strokePath(p, juce::PathStrokeType(2.2f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     }
 
                     // 当前帧：轻微辉光 + 彩色主线（更清晰）
@@ -1149,13 +1251,13 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     glow.applyTransform(juce::AffineTransform::translation(0.0f, 0.6f));
 
                     gg.setColour(juce::Colours::black.withAlpha(0.55f));
-                    gg.strokePath(glow, juce::PathStrokeType(7.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(glow, juce::PathStrokeType(7.5f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     gg.setColour(neonA.withAlpha(0.14f));
-                    gg.strokePath(waveform, juce::PathStrokeType(10.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(10.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     gg.setColour(neonB.withAlpha(0.85f));
-                    gg.strokePath(waveform, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     // 采样点高光（少量）
                     const int step = juce::jmax(1, n / 110);
@@ -1178,19 +1280,19 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     juce::Path shadow = waveform;
                     shadow.applyTransform(juce::AffineTransform::translation(1.2f, 1.0f));
                     gg.setColour(juce::Colours::black.withAlpha(0.55f));
-                    gg.strokePath(shadow, juce::PathStrokeType(6.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(shadow, juce::PathStrokeType(6.2f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     // 外辉光
                     gg.setColour(c.withAlpha(0.14f));
-                    gg.strokePath(waveform, juce::PathStrokeType(9.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(9.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     // 内辉光
                     gg.setColour(c.withAlpha(0.28f));
-                    gg.strokePath(waveform, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(5.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     // 主线
                     gg.setColour(c.withAlpha(0.96f));
-                    gg.strokePath(waveform, juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.2f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     break;
                 }
 
@@ -1203,11 +1305,11 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     mirror.applyTransform(juce::AffineTransform::scale(1.0f, -1.0f, 0.0f, midY));
 
                     gg.setColour(juce::Colours::black.withAlpha(0.55f));
-                    gg.strokePath(mirror, juce::PathStrokeType(3.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(mirror, juce::PathStrokeType(3.6f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     gg.setColour(c.withAlpha(0.95f));
-                    gg.strokePath(waveform, juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-                    gg.strokePath(mirror,  juce::PathStrokeType(2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.2f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+                    gg.strokePath(mirror,  juce::PathStrokeType(2.2f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     break;
                 }
                 case 7:
@@ -1241,17 +1343,29 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     const auto c = waveGlowColour;
 
                     // 当前帧：保留原来的“抖动”风格，但改成 Path 以便写入拖影队列
+                    // 性能优化：同主 waveform 一样做 stride 下采样，避免 jitterPath
+                    // 累积 2048 段。视觉上抖动本身就是随机噪声，下采样对风格无损。
                     juce::Path jitterPath;
                     if (n > 0)
                     {
+                        constexpr int kTargetJitterPoints = 300;
+                        const int jitterStride = juce::jmax(1, n / kTargetJitterPoints);
+
                         const auto p0 = sampleToPoint(0);
                         jitterPath.startNewSubPath(p0.x, p0.y);
-                        for (int i = 1; i < n; ++i)
+                        for (int i = jitterStride; i < n; i += jitterStride)
                         {
                             const auto p1 = sampleToPoint(i);
                             const float jx = (rng.nextFloat() - 0.5f) * 1.6f;
                             const float jy = (rng.nextFloat() - 0.5f) * 1.2f;
                             jitterPath.lineTo(p1.x + jx, p1.y + jy);
+                        }
+                        if (((n - 1) % jitterStride) != 0)
+                        {
+                            const auto pLast = sampleToPoint(n - 1);
+                            const float jx = (rng.nextFloat() - 0.5f) * 1.6f;
+                            const float jy = (rng.nextFloat() - 0.5f) * 1.2f;
+                            jitterPath.lineTo(pLast.x + jx, pLast.y + jy);
                         }
                     }
 
@@ -1271,7 +1385,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                         const float alpha = 0.40f * std::pow(1.0f - u, 2.4f);
 
                         gg.setColour(c.withMultipliedBrightness(brightnessMul).withAlpha(alpha));
-                        gg.strokePath(it.path, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                        gg.strokePath(it.path, juce::PathStrokeType(2.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     }
 
                     const int dots = 120;
@@ -1293,13 +1407,13 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     shadow.applyTransform(juce::AffineTransform::translation(2.0f, 2.0f));
 
                     gg.setColour(juce::Colours::black.withAlpha(0.60f));
-                    gg.strokePath(shadow, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(shadow, juce::PathStrokeType(5.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     gg.setColour(purp.withAlpha(0.20f));
-                    gg.strokePath(waveform, juce::PathStrokeType(7.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(7.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     gg.setColour(purp.withAlpha(1.0f));
-                    gg.strokePath(waveform, juce::PathStrokeType(2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     break;
                 }
                 case 10:
@@ -1328,14 +1442,14 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                         const float alpha = 0.42f * std::pow(1.0f - u, 2.6f);
 
                         gg.setColour(juce::Colours::white.withMultipliedBrightness(brightnessMul).withAlpha(alpha));
-                        gg.strokePath(it.path, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                        gg.strokePath(it.path, juce::PathStrokeType(1.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     }
 
                     gg.setColour(juce::Colours::white.withAlpha(0.10f));
                     gg.drawLine(sb.getX(), midY, sb.getRight(), midY, 1.0f);
 
                     gg.setColour(juce::Colours::white.withAlpha(0.92f));
-                    gg.strokePath(waveform, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(1.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     break;
                 }
 
@@ -1345,10 +1459,10 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                     const auto green = juce::Colour::fromRGB(0x00, 0xFF, 0x66);
 
                     gg.setColour(green.withAlpha(0.15f));
-                    gg.strokePath(waveform, juce::PathStrokeType(8.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(8.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                     gg.setColour(green.withAlpha(1.0f));
-                    gg.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     break;
                 }
                 default:
@@ -1358,7 +1472,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
 
                     gg.setColour(waveBaseColour.withAlpha(0.9f));
 
-                    gg.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                    gg.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                     break;
                 }
             }
@@ -1458,10 +1572,10 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                 juce::Path pb = wave; pb.applyTransform(juce::AffineTransform::translation(-off, 0.0f));
 
                 gg.setColour(juce::Colours::red.withAlpha(alpha));
-                gg.strokePath(pr, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                gg.strokePath(pr, juce::PathStrokeType(3.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
 
                 gg.setColour(juce::Colours::deepskyblue.withAlpha(alpha));
-                gg.strokePath(pb, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                gg.strokePath(pb, juce::PathStrokeType(3.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
             };
 
             auto grain = [&](int dots, juce::Colour c, float a)
@@ -1526,7 +1640,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                             juce::Path ghost = wave;
                             ghost.applyTransform(juce::AffineTransform::translation(ox, oy));
                             gg.setColour(juce::Colours::white.withAlpha(0.04f * amount));
-                            gg.strokePath(ghost, juce::PathStrokeType(6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                            gg.strokePath(ghost, juce::PathStrokeType(6.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
                         }
                     }
 
@@ -1947,7 +2061,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
 
     // ============================================================
     // 3) Remap：按行把 screenBase 采样到 screenWarp
-    //    这里只做左右偏移（电视行同步噪声特征）。
+    //    全帧缓存已在上方处理跳过逻辑，此处始终执行。
     // ============================================================
 
     {
@@ -1956,51 +2070,32 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
 
         for (int y = 0; y < H; ++y)
         {
-            const float dxRow = scanlineOffsetPx[(size_t) y];
+            const int dxPx = (int) std::round(scanlineOffsetPx[(size_t) y]);
             auto* out = reinterpret_cast<juce::PixelARGB*> (dst.getLinePointer(y));
+            const auto* in  = reinterpret_cast<const juce::PixelARGB*> (src.getLinePointer(y));
 
-            // source y 固定（只做横向 remap）
-            const auto* in = reinterpret_cast<const juce::PixelARGB*> (src.getLinePointer(y));
-
-            for (int x = 0; x < W; ++x)
+            if (dxPx == 0)
             {
-                const float sx = (float) x - dxRow;
-
-                if (sx <= 0.0f)
-                {
-                    out[x] = in[0];
-                    continue;
-                }
-                if (sx >= (float) (W - 1))
-                {
-                    out[x] = in[W - 1];
-                    continue;
-                }
-
-                const int x0 = (int) sx;
-                const int x1 = x0 + 1;
-                const float tLerp = sx - (float) x0;
-
-                const auto p0 = in[x0].getNativeARGB();
-                const auto p1 = in[x1].getNativeARGB();
-
-                const auto a0 = (int) ((p0 >> 24) & 0xFF);
-                const auto r0 = (int) ((p0 >> 16) & 0xFF);
-                const auto g0 = (int) ((p0 >>  8) & 0xFF);
-                const auto b0 = (int) ((p0 >>  0) & 0xFF);
-
-                const auto a1 = (int) ((p1 >> 24) & 0xFF);
-                const auto r1 = (int) ((p1 >> 16) & 0xFF);
-                const auto g1 = (int) ((p1 >>  8) & 0xFF);
-                const auto b1 = (int) ((p1 >>  0) & 0xFF);
-
-                auto lerp8 = [&](int v0, int v1)
-                {
-                    const float vv = (1.0f - tLerp) * (float) v0 + tLerp * (float) v1;
-                    return (juce::uint8) juce::jlimit(0, 255, (int) std::round(vv));
-                };
-
-                out[x].setARGB(lerp8(a0, a1), lerp8(r0, r1), lerp8(g0, g1), lerp8(b0, b1));
+                std::memcpy(out, in, (size_t) W * sizeof(juce::PixelARGB));
+            }
+            else if (dxPx >= W)
+            {
+                std::fill_n(out, W, in[0]);
+            }
+            else if (-dxPx >= W)
+            {
+                std::fill_n(out, W, in[W - 1]);
+            }
+            else if (dxPx > 0)
+            {
+                std::fill_n(out, dxPx, in[0]);
+                std::memcpy(out + dxPx, in, (size_t) (W - dxPx) * sizeof(juce::PixelARGB));
+            }
+            else // dxPx < 0
+            {
+                const int shift = -dxPx;
+                std::memcpy(out, in + shift, (size_t) (W - shift) * sizeof(juce::PixelARGB));
+                std::fill_n(out + (W - shift), shift, in[W - 1]);
             }
         }
     }
@@ -2299,10 +2394,41 @@ LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& 
     setResizable(true, true);
 
     resizeConstrainer.setFixedAspectRatio(editorAspectRatio);
-    resizeConstrainer.setSizeLimits(320, 240, 1600, 1200);
-    setConstrainer(&resizeConstrainer);
 
-    setSize(1400, 1050);
+    // 根据屏幕尺寸动态计算最大窗口大小，防止插件界面超出屏幕
+    {
+        int maxLimitW = 1600;
+        int maxLimitH = 1200;
+        int initW = 1400;
+        int initH = 1050;
+
+        if (auto* disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+        {
+            const auto screenArea = disp->userArea; // 可用区域（排除 Dock/菜单栏）
+            constexpr int screenMargin = 60; // 四周留白，确保窗口不贴边
+
+            const int screenMaxW = screenArea.getWidth() - screenMargin * 2;
+            const int screenMaxH = screenArea.getHeight() - screenMargin * 2;
+
+            // 保持宽高比的前提下，找到能放进屏幕的最大尺寸
+            maxLimitW = juce::jmin(1600, screenMaxW);
+            maxLimitH = maxLimitW * baseEditorHeight / baseEditorWidth;
+            if (maxLimitH > screenMaxH)
+            {
+                maxLimitH = screenMaxH;
+                maxLimitW = maxLimitH * baseEditorWidth / baseEditorHeight;
+            }
+
+            // 初始窗口也做同样约束
+            initW = juce::jmin(1400, maxLimitW);
+            initH = initW * baseEditorHeight / baseEditorWidth;
+        }
+
+        resizeConstrainer.setSizeLimits(320, 240, maxLimitW, maxLimitH);
+        setSize(initW, initH);
+    }
+
+    setConstrainer(&resizeConstrainer);
 
     addAndMakeVisible(oscilloscope);
     addAndMakeVisible(bypassHitArea);

@@ -22,7 +22,7 @@ VERSION 1.1.9
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Ldsj
         PLUGIN_CODE Ldsj
-        FORMATS VST3 Standalone
+        FORMATS VST3 AU Standalone
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE

@@ -255,6 +255,16 @@ private:
         double preset10TrailLastSec = 0.0;
         std::deque<Preset3TrailItem> preset10Trail;
 
+        // 背景缓存：大部分预设背景是静态或极慢速动画，缓存后避免每帧重绘大幅节省 CPU
+        juce::Image cachedBackground;
+        int cachedBgPreset = -1;
+
+        // 自适应帧率：用 ms 精度测量帧间隔，连续超标则降 Timer 频率
+        double lastTimerCallbackMs = 0.0;
+        int    currentTimerHz = 30;
+        int    consecutiveOverBudget  = 0;
+        int    consecutiveUnderBudget = 0;
+
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OscilloscopeComponent)
     };
 

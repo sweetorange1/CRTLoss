@@ -8,8 +8,8 @@
 - **JUCE 版本**：8.0.12
 - **插件格式**：VST3 + Standalone
 - **CMake 版本号**（`CMakeLists.txt` 中 `juce_add_plugin` 的 `VERSION`）：`1.1.9`
-- **UI 版本号**（`PluginEditor.cpp` 中 `kPluginUiVersionText`）：`v1.4.0`
-- **文档版本**：`0.0.5`
+- **UI 版本号**（`PluginEditor.cpp` 中 `kPluginUiVersionText`）：`v1.4.4`
+- **文档版本**：`0.0.7`
 
 ---
 
@@ -222,7 +222,7 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 
 ### 5.7 版本水印（右下角）
 
-- 显示文本 `kPluginUiVersionText`（当前 `v1.4.0`）。
+- 显示文本 `kPluginUiVersionText`（当前 `v1.4.4`）。
 - 悬停时下划线 + 手型指针。
 - 单击 → `juce::URL("https://iisaacbeats.cn").launchInDefaultBrowser()`。
 
@@ -265,7 +265,8 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | 2026-07-09 | 0.0.2 | 1.1.7 | v1.3.1 | 新增第 3 种 Loss 算法 **FFT-Mask**（`kLossAlgorithmFftMask=2`）：STFT+Hann+75% overlap+OLA，逐 bin 乘 `g = 1 − wet(band(k))` 保留相位；`ST/SAP` 遥控按钮改为三态循环（Legacy → UniformBW → FFT-Mask → Legacy），左上模式 OSD 支持 `ST/SAP: LEGACY Q / UNIFORM BW / FFT MASK` 三种文案；FFT 模式下 `setLatencySamples(N−hop)=1536`，切回 IIR 模式清 0 |
 | 2026-07-09 | 0.0.3 | 1.1.8 | v1.3.1 | 修复 **Legacy / UniformBandwidth 两种 IIR 丢频算法在重触发时产生的"电流声 / 咕嗒声"**：引入 `previousLossMask` 快照，在 `retriggerLossMask` 末尾对"上一帧为保留 (1) 但当帧变为丢弃 (0)"的每一个 band 执行 `lossBandNotchL/R[b].reset()` + `lossBandWet[b] = 0.0f`，强制从零初始状态拉起；同时把 `kLossMaskSmoothingTimeSeconds` 从 10ms 拉长到 25ms，为低频段 Notch 留出建立稳态的时间；FFT-Mask 分支无 IIR 内部状态，不受影响 |
 | 2026-07-10 | 0.0.4 | 1.1.9 | v1.4.0 | **调整固定预设 0..11 的顺序**：`display_present::kPresets` 循环左移一位（旧 1..11 → 新 0..10，旧 0 → 新 11），且开机默认停留在新预设 0（原预设 1）。同时在 `PluginEditor.cpp::OscilloscopeComponent::paint()` 中把 `stylePreset` 的"固定频道路径"从 `= preset` 改为 `= mapToLegacyStyleIndex(preset)`（新 0..10→旧 1..11，新 11→旧 0），并把 `getWaveBaseColour()` 内的 `switch (preset)` 改为 `switch (stylePreset)`。使得**波形颜色 / 波形绘制样式 / glitch 撕裂效果**这三块硬编码视觉分支跟随数据一起从旧位置搬到新位置——数据（背景、扫描线扭曲、丢频算法、高低切）与外观（波形颜色、绘制样式、glitch）完全同步 |
-| 2026-07-10 | 0.0.5 | 1.1.9 | v1.4.0 | **修复 Windows 安装包打包脚本**：把 [build_installer.bat](build_installer.bat) 精简为纯「校验 Release 产物 → 定位 ISCC → 调用 ISCC」三步，彻底移除内嵌的 CMake configure / vcvars / Ninja 逻辑，避免脚本自作主张地重新配置构建目录。[CRTloss_installer.iss](CRTloss_installer.iss) 的 `[Files] Source` 由错误的 `cmake-build-release-installer\...` 改回 CLion Release profile 的真实产物目录 `cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3\*`；同时把 `MyAppVersion` 从遗留的 `1.1.9`（笔误，本应是安装包版本而非 CMake 版本）与 UI 主版本对齐为 `1.4.0`，安装包文件名规范化为 `CRTloss_Setup_1.4.0_x64.exe` |
+| 2026-07-10 | 0.0.6 | 1.1.9 | v1.4.3 | **macOS 性能优化系列**（详见 7.2 踩坑记录）：(1) **窗口大小保护**：构造函数中动态检测主屏幕可用区域，初始窗口尺寸与最大允许尺寸取较小值，四周留 60px 边距，避免插件界面超出屏幕。(2) **背景缓存**：OscilloscopeComponent 中复杂的渐变/网格/噪点背景仅在切换预设或尺寸变化时重绘一次，其余帧直接贴缓存 Image，大幅降低 CPU 绘制开销。(3) **remap 整像素偏移优化**：将 remap 循环从「逐像素浮点 LERP 插值」（28 万像素 × 每像素 8 次 getNativeARGB 位运算 + 4 次 float lerp + setARGB）改为「整行 memcpy/fill_n 块拷贝」，运算量从 ~850 万次/帧降为 ~500 次/帧。(4) **自适应帧率**：timerCallback 中用 `getMillisecondCounterHiRes` 测量帧间隔，连续超预算自动降 Timer 频率（30→24→18→12→10Hz），负载减轻后自动回升。(5) **恢复 `setBufferedToImage(true)`**：将 Component 绘制缓冲在 JUCE 内部 Image 中，paint() 返回后一次性 blit 到窗口，避免每帧多次跨进程 IPC 阻塞（这是 macOS 下 CPU 低但帧率极低的根因）
+| 2026-07-10 | 0.0.7 | 1.1.9 | v1.4.4 | **macOS 波形绘制性能收尾 + mac 打包脚本**：(1) **波形描边全面切换为 `PathStrokeType::mitered`**：全文件 28 处 `PathStrokeType::curved` 替换为 `mitered`。原本的 `curved` 会让 CoreGraphics 对每一段做贝塞尔样条拟合 + 子像素抗锯齿累加，是 macOS 上"有音频信号 CPU 反而只有 8% 但界面卡到 10fps"的直接根源；改成 `mitered` 后每段就是纯直线，光栅化压力骤降。(2) **波形 Path 下采样**：`waveform` 从 2048 段降为 ≈ 300 段（stride = jmax(1, n/300)），最后一个样本兜底 lineTo。原本 2048 点挤在 606 像素上（每像素 3.4 个点）视觉上完全冗余，却让 CoreGraphics 为每段做独立子像素累加。同一优化同步应用到 case 8 的 `jitterPath`。(3) **静音短路**：整帧样本 `\|s\| < 1e-4` 时，波形只画一条 2 点水平直线，彻底绕开复杂 Path 描边。三项叠加解决"有音频 CPU 低但卡、无音频 CPU 高但流畅"的悖论。(4) **新增 [build_installer_mac.sh](build_installer_mac.sh)**：macOS 打包脚本，用 `pkgbuild` + `productbuild` 把 VST3 + AU 组件打成一个用户可双击安装的 `.pkg`（安装到 `/Library/Audio/Plug-Ins/{VST3,Components}/`），可选再用 `hdiutil` 生成 `.dmg`。版本号从 `PluginEditor.cpp` 自动抽取，与 Windows iss 语义一致；严格 KISS，不触碰编译
 
 ### 7.2 踩坑记录
 
@@ -280,7 +281,7 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | DSP | JUCE `dsp::FFT::performRealOnlyForwardTransform` 的实数打包容易漏 Nyquist | 特殊处理 bin0（存于 `fftWork[0]`）和 binN/2（存于 `fftWork[1]`），中间 bin 才是交错复数 | 0.0.2 |
 | DSP | 直接把 IFFT 输出加合成窗后累加会产生轻微幅度起伏 | OLA 累加同时累加 `∑w²`，输出时按 `y / (∑w² + ε)` 归一化，避免 75% overlap 下的 3× 增益偏移 | 0.0.2 |
 | DSP | Legacy / UniformBandwidth 每次重触发时都有一下明显的"电流声"（FFT-Mask 无此现象） | 根因：`juce::IIRFilter` 是 direct-form 二阶结构，内部延迟状态 v1/v2 无论 wet 是否为 0 都在被 x 持续激励；长时间处于 wet=0 的 band 内部已累积与信号能量相关的稳态数值，一旦 wet 0→1 就会接入滤波器瞬态尾巴，多 band 叠加即为"咕嗒"。解决：重触发时对 previous=1∧current=0 的 band 手动 `reset()` 并强制 `lossBandWet=0`，从归零的状态向 wet=1 平滑 | 0.0.3 |
-| DSP | wet 平滑 10ms 对低频段 Notch（群延迟本身就接近 10ms）“追不上"，即使 reset 也有残留尾巴 | 把 `kLossMaskSmoothingTimeSeconds` 从 0.010f 拉长到 0.025f（对扫频预设听感还不至于"发糊"） | 0.0.3 |
+| DSP | wet 平滑 10ms 对低频段 Notch（群延迟本身就接近 10ms）"追不上"，即使 reset 也有残留尾巴 | 把 `kLossMaskSmoothingTimeSeconds` 从 0.010f 拉长到 0.025f（对扫频预设听感还不至于"发糊"） | 0.0.3 |
 | DSP | 如果对所有变化的 band 都 reset，会引入反方向（1→0）的二次咕嗒 | 仅对 previous=1∧current=0 （新变为丢弃）的方向做 reset；反方向 wet 从 1→0 接入量递减不会激发瞬态，且反方向 reset 会丢失滤波器自然收尾 | 0.0.3 |
 | 状态 | `prepareToPlay` / `releaseResources` 中若不同步 `previousLossMask` 初始化，首次 retrigger 会把全部 band 误判为"新丢弃" | 在两处都添加 `previousLossMask.fill(1)`，与 `lossMask.fill(1)` 对齐 | 0.0.3 |
 | UI | 只挪 `kPresets` 数组，视觉外观没跟着搬——切到新预设 0 时听感变了但屏幕上的波形颜色 / 绘制样式 / glitch 干扰仍停留在原位 | 根因：`PluginEditor.cpp` 里有 3 处硬编码 `switch` 按预设序号分派视觉效果（波形颜色 `switch (preset)`、波形样式 + 预设 0 雪花底 `switch (stylePreset)`、glitch 干扰 `switch (stylePreset)`）。解决：不动 3 处庞大的 switch 主体，只在 `stylePreset` 计算点做**新序号→旧序号映射**（`mapToLegacyStyleIndex`），一处映射全局同步；`getWaveBaseColour()` 内的 `switch (preset)` 顺手改为 `switch (stylePreset)` 保持一致 | 0.0.4 |
@@ -290,6 +291,18 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | 打包 | 之前给 bat 加了「自动 CMake configure + build Release」逻辑，反复报 `Running 'nmake' '-?' failed`、`No files found matching ...\Release\VST3\*` | 根因：脚本对 CLion 自身的 profile 目录做二次 configure 时用了不匹配的 Generator（默认拿到了 NMake），且 CLion 在 IDE 内并未真正跑过 Release build，导致产物目录只有壳没有二进制。结论：**打包脚本不应触碰编译**，编译由 CLion 负责；bat 只做产物校验和调 ISCC。任何 iss 里的 Source 路径必须对齐 CLion 实际生成目录 `cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3` | 0.0.5 |
 | 打包 | iss 的 `MyAppVersion` 长期停留在 `1.1.9`，与 UI 显示的 `v1.4.0` 严重错位，安装包文件名误导 | 明确约定：`MyAppVersion` 跟随「用户可感知的主版本」（也就是 `kPluginUiVersionText` 去掉前缀 `v` 后的值），CMake `VERSION` 是插件内部构建号，两者不必强绑定但 iss 必须与 UI 主版本对齐 | 0.0.5 |
 | 流程 | 反复在 bat 里"多做一点"结果一次比一次糟 | 教训：bat 打包脚本严格遵循 KISS —— 只做「校验 → 定位 ISCC → 调 ISCC」三步；编译、目录切换、Generator 选择、vcvars 全部交给 CLion / 开发者手动完成。任何试图在 bat 里"顺便帮用户构建"的行为，长期看都会带来更多环境相关的失败案例 | 0.0.5 |
+| 渲染 | macOS 下 `setBufferedToImage(true)` 被误移除后，CPU 占用仅 8% 但帧率 ~10fps，画面一卡一卡 | 根因：没有 `setBufferedToImage` 时，JUCE 的 `paint()` 中每次 `drawImage` / `strokePath` 都直接输出到窗口的 `CGContextRef`，经窗口服务器 IPC（跨进程通信）处理。窗口服务器繁忙时这些调用会阻塞等待，不消耗 CPU 但大幅拉低帧率。恢复 `setBufferedToImage(true)` 后，所有绘制在 JUCE 内部 `Image` 缓冲上完成，`paint()` 返回后一次性 blit，零 IPC 开销 | 0.0.6 |
+| 渲染 | 半分辨率渲染（`internalRenderScale=0.5f`）导致电视机中文字显示不全、波形模糊带泛光 | 根因：所有内容（背景/文字/波形）都在半分辨率离屏缓冲区上绘制，再通过 `lowResamplingQuality` 上采样到全屏。文字坐标按全分辨率设计，在半分辨缓冲区上超出边界被裁切。解决：移除 `internalRenderScale`，恢复全分辨率渲染 | 0.0.6 |
+| 渲染 | 全帧缓存（`cachedFrame + sampleHash 指纹`）在有音频信号时完全无效 | 根因：`sampleHash` 取 `samples[0]*10000 + samples[n/2]*10000 + samples[n-1]*10000`，音频信号每帧都在波动，指纹从未命中。且每帧还额外多做一次 `screenWarp.createCopy()`（606×466×4B ≈ 1.1MB 分配+拷贝），反增开销。解决：彻底移除全帧缓存逻辑 | 0.0.6 |
+| 渲染 | remap 解耦（remapFrameCounter / noiseFingerprint）从未跳过 remap | 根因：`noiseFingerprint` 依赖 `scanlineOffsetPx`，而偏移量公式包含 `sin(seconds * driftFreq + y * driftYMul)`，时间漂移导致偏移值每帧都变，`noiseChanged` 永远为 true，`doRemap` 从未被跳过。解决：移除指纹/计数器逻辑，改为直接优化 remap 本身（整像素偏移 + memcpy） | 0.0.6 |
+| 渲染 | 自适应帧率初版用 `getHighResolutionTicks()` 测量时间，单位错误导致测量失效 | 根因：macOS 上 `getHighResolutionTicks()` 返回纳秒级原始计数器值（tick ≈ 1ns），但代码中将其当作微秒与微秒级 budget 比较（33,333µs budget vs 33,000,000 实际 µs），永远"超预算"。解决：改用 `getMillisecondCounterHiRes()` 返回毫秒精度值 | 0.0.6 |
+| 渲染 | 逐像素浮点 LERP remap 是绝对性能瓶颈（~850 万次浮点运算/帧），优化其他步骤无效 | 根因：606×466 像素 × 每像素 ~30 次浮点/整数运算 ≈ 850 万次运算/帧。半分辨率渲染、背景缓存、remap 解耦都无法消除这个 CPU 密集计算。解决：将浮点 LERP 改为整像素偏移 + 整行 memcpy/fill_n。CRT 噪声偏移本身较小且混沌，亚像素精度在视觉上不可见 | 0.0.6 |
+| 渲染 | macOS 上「有音频 CPU 8% 但界面 10fps 卡顿，无音频 CPU 15% 反而流畅」的悖论 | 表象反常，但物理成因清晰：`curved` 描边会让 CoreGraphics 对每段做贝塞尔样条 + 子像素抗锯齿累加，2048 段 Path 会把光栅化命令队列打爆，UI 线程被 Metal 后端同步阻塞——此时不消耗 CPU 但墙钟时间在流逝。反之无音频时波形是几乎水平的直线，CoreGraphics 走内部 fast path 反而流畅。解决三件套：(1) 全部 28 处 `curved` → `mitered`；(2) waveform / jitterPath 下采样到 ~300 段；(3) 静音（`\|s\| < 1e-4`）短路为 2 点直线 | 0.0.7 |
+| 渲染 | 下采样时若 `stride` 无法整除 `n-1`，右侧会留出一小段空白 | 循环之后再单独 `lineTo(sampleToPoint(n-1))` 兜底，代价忽略不计，且能保证波形右端总是贴到屏幕最右侧 | 0.0.7 |
+| 视觉 | 担心 `curved` → `mitered` 视觉退化 | 实测无感：原本 2048 点每点间距 ~0.3 像素，「曲线感」完全被像素密度掩盖；下采样到 300 点后每段 ~2 像素，直线段依然连贯。且 `mitered` 尖角其实**更贴合** CRT 示波器逐点扫描的锯齿质感 | 0.0.7 |
+| 打包 | 之前只有 Windows 端 Inno Setup 打包脚本，macOS 端一直靠手动 cp 到 `/Library/Audio/Plug-Ins/` | 新增 [build_installer_mac.sh](build_installer_mac.sh)：用 macOS 原生 `pkgbuild` + `productbuild` 走两级组件 pkg → distribution pkg 的标准流程，可选再 `hdiutil` 生成 dmg。安装路径固定为系统级 `/Library/Audio/Plug-Ins/VST3` 与 `/Library/Audio/Plug-Ins/Components`，无需 admin 之外的额外权限申请 | 0.0.7 |
+| 打包 | pkgbuild 的 `--root` 目录结构必须"就是最终安装到目标机器的绝对路径" | 实现方式：脚本先建立 `.pkg_staging/{vst3_root,au_root}/Library/Audio/Plug-Ins/{VST3,Components}/` 完整树，把产物 `cp -R` 进去，再对每个 root 单独 pkgbuild，最后 productbuild 用 Distribution.xml 合成。这样安装器就自然把 `.vst3 / .component` 释放到正确位置 | 0.0.7 |
+| 打包 | 版本号维护点分散：CMake VERSION / iss MyAppVersion / UI kPluginUiVersionText 三处容易脱节 | mac 端选择自动化：脚本用 `grep -Eo` 从 PluginEditor.cpp 抽取 `kPluginUiVersionText`，作为 pkg 文件名和内部版本号，避免手抖改错；与 Windows iss `MyAppVersion` 语义一致（跟随用户可感知的主版本） | 0.0.7 |
 
 <!-- 后续每次开发结束后，在这里追加行。示例格式：
 | DSP | HPF/LPF 参数每帧微调导致电流感 | 引入 kCutCrossfadeRetuneHzEpsilon=18Hz 抖动阈值，避免频繁重启 crossfade | 0.0.x |

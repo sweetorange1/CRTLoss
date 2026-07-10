@@ -7,7 +7,8 @@
 #include <vector>
 #include <memory>
 
-class LDSJvstAudioProcessor : public juce::AudioProcessor
+class LDSJvstAudioProcessor : public juce::AudioProcessor,
+                              private juce::AudioProcessorParameter::Listener
 {
 public:
     LDSJvstAudioProcessor();
@@ -27,6 +28,9 @@ public:
     bool producesMidi() const override;
     bool isMidiEffect() const override;
     double getTailLengthSeconds() const override;
+
+    // 告知宿主 Bypass 参数（走 addParameter 注册的 paramBypass）
+    juce::AudioProcessorParameter* getBypassParameter() const override;
 
     int getNumPrograms() override;
     int getCurrentProgram() override;
@@ -63,7 +67,11 @@ public:
     float getPreGainDb() const noexcept { return preGainDb.load(std::memory_order_relaxed); }
     void setPreGainDb(float db) noexcept
     {
-        preGainDb.store(juce::jlimit(kPreGainDbMin, kPreGainDbMax, db), std::memory_order_relaxed);
+        const float clamped = juce::jlimit(kPreGainDbMin, kPreGainDbMax, db);
+        if (paramPreGainDb != nullptr)
+            writeFloatParamFromUI(paramPreGainDb, clamped);
+        else
+            preGainDb.store(clamped, std::memory_order_relaxed);
     }
     void addPreGainDb(float deltaDb) noexcept { setPreGainDb(getPreGainDb() + deltaDb); }
 
@@ -84,7 +92,11 @@ public:
     float getLimiterThreshold() const noexcept { return limiterThreshold.load(std::memory_order_relaxed); }
     void setLimiterThreshold(float th) noexcept
     {
-        limiterThreshold.store(juce::jlimit(kLimiterThresholdMin, kLimiterThresholdMax, th), std::memory_order_relaxed);
+        const float clamped = juce::jlimit(kLimiterThresholdMin, kLimiterThresholdMax, th);
+        if (paramLimiterThreshold != nullptr)
+            writeFloatParamFromUI(paramLimiterThreshold, clamped);
+        else
+            limiterThreshold.store(clamped, std::memory_order_relaxed);
     }
 
     // 频带丢失 Notch Q：用于测试不同陷波带宽（Q越大，带宽越窄）
@@ -109,8 +121,11 @@ public:
     int getLossAlgorithmMode() const noexcept { return lossAlgorithmMode.load(std::memory_order_relaxed); }
     void setLossAlgorithmMode(int mode) noexcept
     {
-        lossAlgorithmMode.store(juce::jlimit(kLossAlgorithmLegacy, kLossAlgorithmFftMask, mode),
-                                std::memory_order_relaxed);
+        const int clamped = juce::jlimit(kLossAlgorithmLegacy, kLossAlgorithmFftMask, mode);
+        if (paramLossAlgorithm != nullptr)
+            writeChoiceParamFromUI(paramLossAlgorithm, clamped);
+        else
+            lossAlgorithmMode.store(clamped, std::memory_order_relaxed);
     }
     // 三态循环：Legacy → UniformBandwidth → FFT-Mask → Legacy
     void toggleLossAlgorithmMode() noexcept
@@ -127,7 +142,10 @@ public:
 
     void setLossMaskInverted(bool inverted) noexcept
     {
-        lossMaskInverted.store(inverted, std::memory_order_release);
+        if (paramLossMaskInvert != nullptr)
+            writeBoolParamFromUI(paramLossMaskInvert, inverted);
+        else
+            lossMaskInverted.store(inverted, std::memory_order_release);
     }
 
     void toggleLossMaskInverted() noexcept
@@ -192,19 +210,29 @@ public:
     {
         const float hi = getHighCutHz();
         const float clamped = juce::jlimit(kLowCutHzMin, juce::jmin(kLowCutHzMax, hi), hz);
-        lowCutHz.store(clamped, std::memory_order_relaxed);
+        if (paramLowCutHz != nullptr)
+            writeFloatParamFromUI(paramLowCutHz, clamped);
+        else
+            lowCutHz.store(clamped, std::memory_order_relaxed);
     }
 
     void setHighCutHz(float hz) noexcept
     {
         const float lo = getLowCutHz();
         const float clamped = juce::jlimit(juce::jmax(kHighCutHzMin, lo), kHighCutHzMax, hz);
-        highCutHz.store(clamped, std::memory_order_relaxed);
+        if (paramHighCutHz != nullptr)
+            writeFloatParamFromUI(paramHighCutHz, clamped);
+        else
+            highCutHz.store(clamped, std::memory_order_relaxed);
     }
 
     void setCutMode(int mode) noexcept
     {
-        cutMode.store(juce::jlimit(kCutModeHardMask, kCutModeHpfLpf, mode), std::memory_order_relaxed);
+        const int clamped = juce::jlimit(kCutModeHardMask, kCutModeHpfLpf, mode);
+        if (paramCutMode != nullptr)
+            writeChoiceParamFromUI(paramCutMode, clamped);
+        else
+            cutMode.store(clamped, std::memory_order_relaxed);
     }
 
     void setCutSlopeDbPerOct(int slope) noexcept
@@ -214,7 +242,18 @@ public:
             normalized = kCutSlope48dB;
         else if (slope >= kCutSlope24dB)
             normalized = kCutSlope24dB;
-        cutSlopeDbPerOct.store(normalized, std::memory_order_relaxed);
+
+        if (paramCutSlope != nullptr)
+        {
+            // Choice index: 0->12, 1->24, 2->48
+            const int idx = (normalized == kCutSlope48dB) ? 2
+                          : (normalized == kCutSlope24dB) ? 1 : 0;
+            writeChoiceParamFromUI(paramCutSlope, idx);
+        }
+        else
+        {
+            cutSlopeDbPerOct.store(normalized, std::memory_order_relaxed);
+        }
     }
 
     void setCutDragActive(bool active) noexcept
@@ -249,6 +288,10 @@ public:
 
     std::atomic<bool> bypassed { false };
 
+    // 供 UI（编辑器 Bypass 触发区 / 遥控器 BYPASS 键）调用：
+    // 通过参数写入，让宿主可以录制/自动化 Bypass。
+    void writeBypassFromUI(bool newBypassed) noexcept;
+
     bool isShuttingDownNow() const noexcept
     {
         return isShuttingDown.load(std::memory_order_acquire);
@@ -257,6 +300,36 @@ public:
 private:
     static constexpr int oscilloscopeBufferSize = 2048;
     static constexpr int kLossBandCount = 100;
+
+    // ---------------- 宿主可自动化参数（AudioProcessor 拥有生命周期） ----------------
+    //  这些指针指向通过 addParameter(...) 注册的原始 juce::AudioParameter* 对象。
+    //  UI 上的按钮 / 拖拽 / 遥控器操作 -> 通过 setter 写入这些参数（gesture + setValueNotifyingHost），
+    //  同时 parameterValueChanged 回调把值同步到下面的 std::atomic<> 供音频线程读取。
+    juce::AudioParameterBool*   paramBypass          = nullptr; // 硬 bypass（会被 setBypassParameter 认领）
+    juce::AudioParameterFloat*  paramPreGainDb       = nullptr;
+    juce::AudioParameterFloat*  paramLimiterThreshold = nullptr;
+    juce::AudioParameterFloat*  paramLowCutHz        = nullptr;
+    juce::AudioParameterFloat*  paramHighCutHz       = nullptr;
+    juce::AudioParameterChoice* paramCutMode         = nullptr; // HardMask / HPF-LPF
+    juce::AudioParameterChoice* paramCutSlope        = nullptr; // 12 / 24 / 48 dB/oct
+    juce::AudioParameterChoice* paramLossAlgorithm   = nullptr; // Legacy / UniformBW / FFT Mask
+    juce::AudioParameterBool*   paramLossMaskInvert  = nullptr;
+
+    // 递归保护：当宿主自动化 → parameterValueChanged → atomic 同步时，不再回写参数；
+    // 反之，UI setter → 参数写入 → parameterValueChanged 内部只把 atomic 校准一次即可。
+    std::atomic<int> parameterCallbackDepth { 0 };
+
+    void createAndRegisterHostParameters();
+    void syncAtomicFromParameter(juce::AudioProcessorParameter* p);
+
+    // juce::AudioProcessorParameter::Listener
+    void parameterValueChanged(int parameterIndex, float newValue) override;
+    void parameterGestureChanged(int parameterIndex, bool gestureIsStarting) override;
+
+    // 由 UI setter 使用：把外部值写入指定参数（做 0..1 归一化），并触发一次 host 通知
+    void writeFloatParamFromUI(juce::AudioParameterFloat* p, float newValue) noexcept;
+    void writeChoiceParamFromUI(juce::AudioParameterChoice* p, int newIndex) noexcept;
+    void writeBoolParamFromUI(juce::AudioParameterBool* p, bool newValue) noexcept;
 
     void pushSamplesToOscilloscope(const float* samples, int numSamples);
 

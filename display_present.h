@@ -261,18 +261,7 @@ namespace display_present
     // ==============================
     inline const std::array<DisplayPresetParams, (size_t) kPresetCount> kPresets =
     {
-        // 0
-        DisplayPresetParams{
-            BackgroundParams{ BackgroundKind::legacySolid, juce::Colours::black.withAlpha(0.06f), juce::Colours::black, 0.15f, 0.00f, 6, 0.00f, 32, 0.10f, 2, 0.0f, 1.0f, 0.10f },
-            ScanlineWarpParams{ 8.0f, 10, 0.70f, 0.70f },
-            OSDParams{},
-            LossDistributionParams{ LossProbabilityModel::constant, 0.40f, 0.0f },
-            LossRandomParams{ 1.0f, 0.01f, 1.20f },
-            LossSequenceParams{},
-            CutPresetParams{ 0, 12, 20.0f, 20000.0f, true }
-        },
-
-        // 1
+        // 0 （原 1）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::digitalGrid, juce::Colour::fromRGB(0x05, 0x0E, 0x1A), juce::Colour::fromRGB(0x00, 0x1A, 0x2C), 0.18f, 0.00f, 8, 0.06f, 28, 0.05f, 2, 0.12f, 0.8f, 0.10f },
             ScanlineWarpParams{ 2.0f, 6, 0.25f, 0.88f },
@@ -283,7 +272,7 @@ namespace display_present
             CutPresetParams{ 0, 12, 20.0f, 20000.0f, true }
         },
 
-        // 2
+        // 1 （原 2）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::amberVignette, juce::Colour::fromRGB(0x10, 0x06, 0x00), juce::Colour::fromRGB(0x06, 0x02, 0x00), 0.62f, 0.05f, 4, 0.00f, 32, 0.18f, 2, 0.0f, 0.55f, 0.12f },
             ScanlineWarpParams{ 4.0f, 12, 0.45f, 0.82f },
@@ -294,7 +283,7 @@ namespace display_present
             CutPresetParams{ 0, 12, 20.0f, 20000.0f, true }
         },
 
-        // 3
+        // 2 （原 3）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::rainbowInterference, juce::Colours::black.withAlpha(0.35f), juce::Colours::black, 0.10f, 0.00f, 6, 0.00f, 32, 0.00f, 2, 0.0f, 1.10f, 0.12f },
             ScanlineWarpParams{ 3.0f, 5, 0.55f, 0.78f },
@@ -305,7 +294,7 @@ namespace display_present
             CutPresetParams{ 1, 12, 55.0f, 18000.0f, true }
         },
 
-        // 4
+        // 3 （原 4）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::radarSweep, juce::Colour::fromRGB(0x00, 0x05, 0x10), juce::Colour::fromRGB(0x00, 0x00, 0x02), 0.42f, 0.00f, 8, 0.055f, 32, 0.00f, 2, 0.0f, 0.90f, 0.14f },
             ScanlineWarpParams{ 5.0f, 4, 0.60f, 0.75f },
@@ -316,7 +305,7 @@ namespace display_present
             CutPresetParams{ 1, 24, 80.0f, 16000.0f, true }
         },
 
-        // 5
+        // 4 （原 5）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::phosphorBloom, juce::Colour::fromRGB(0x00, 0x05, 0x0A), juce::Colour::fromRGB(0x00, 0x10, 0x12), 0.28f, 0.00f, 10, 0.00f, 32, 0.20f, 2, 0.0f, 0.75f, 0.14f },
             ScanlineWarpParams{ 2.8f, 8, 0.35f, 0.88f },
@@ -333,7 +322,7 @@ namespace display_present
             CutPresetParams{ 1, 24, 35.0f, 19000.0f, true }
         },
 
-        // 6
+        // 5 （原 6）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::mirrorCross, juce::Colour::fromRGB(0x00, 0x08, 0x04), juce::Colour::fromRGB(0x00, 0x12, 0x08), 0.20f, 0.00f, 10, 0.04f, 40, 0.16f, 2, 0.0f, 0.85f, 0.10f },
             ScanlineWarpParams{ 6.0f, 7, 0.65f, 0.72f },
@@ -351,7 +340,7 @@ namespace display_present
             CutPresetParams{ 1, 24, 30.0f, 14000.0f, true }
         },
 
-        // 7
+        // 6 （原 7）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::barcode, juce::Colour::fromRGB(0x08, 0x02, 0x10), juce::Colour::fromRGB(0x02, 0x00, 0x04), 0.22f, 0.00f, 9, 0.00f, 32, 0.00f, 2, 0.0f, 0.95f, 0.12f },
             ScanlineWarpParams{ 3.5f, 8, 0.40f, 0.86f },
@@ -362,7 +351,7 @@ namespace display_present
             CutPresetParams{ 1, 48, 70.0f, 12500.0f, true }
         },
 
-        // 8
+        // 7 （原 8）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::glitchStatic, juce::Colours::black.withAlpha(0.18f), juce::Colours::black, 0.18f, 0.00f, 7, 0.00f, 32, 0.00f, 2, 0.0f, 1.20f, 0.14f },
             ScanlineWarpParams{ 10.0f, 3, 0.85f, 0.65f },
@@ -373,7 +362,7 @@ namespace display_present
             CutPresetParams{ 0, 12, 20.0f, 20000.0f, true }
         },
 
-        // 9
+        // 8 （原 9）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::neonStarfield, juce::Colour::fromRGB(0x05, 0x00, 0x08), juce::Colour::fromRGB(0x00, 0x00, 0x00), 0.30f, 0.00f, 10, 0.00f, 32, 0.00f, 2, 0.0f, 0.70f, 0.12f },
             ScanlineWarpParams{ 4.5f, 11, 0.35f, 0.88f },
@@ -384,7 +373,7 @@ namespace display_present
             CutPresetParams{ 0, 12, 20.0f, 20000.0f, true }
         },
 
-        // 10
+        // 9 （原 10）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::minimalVignette, juce::Colours::black.withAlpha(0.15f), juce::Colours::black, 0.22f, 0.00f, 12, 0.00f, 32, 0.00f, 2, 0.0f, 0.50f, 0.08f },
             ScanlineWarpParams{ 1.5f, 6, 0.18f, 0.92f },
@@ -404,7 +393,7 @@ namespace display_present
             CutPresetParams{ 1, 12, 45.0f, 9000.0f, true }
         },
 
-        // 11
+        // 10 （原 11）
         DisplayPresetParams{
             BackgroundParams{ BackgroundKind::greenTerminal, juce::Colour::fromRGB(0x00, 0x10, 0x08), juce::Colour::fromRGB(0x00, 0x06, 0x03), 0.20f, 0.00f, 9, 0.00f, 32, 0.18f, 2, 0.0f, 0.90f, 0.12f },
             ScanlineWarpParams{ 5.5f, 9, 0.55f, 0.80f },
@@ -423,6 +412,17 @@ namespace display_present
             LossRandomParams{ 1.0f, 0.01f, 1.20f },
             LossSequenceParams{ true, 2, 50, 80, 4, 1, true, 0.75f, 0.02f, 0.80f },
             CutPresetParams{ 1, 24, 180.0f, 12000.0f, true }
+        },
+
+        // 11 （原 0）
+        DisplayPresetParams{
+            BackgroundParams{ BackgroundKind::legacySolid, juce::Colours::black.withAlpha(0.06f), juce::Colours::black, 0.15f, 0.00f, 6, 0.00f, 32, 0.10f, 2, 0.0f, 1.0f, 0.10f },
+            ScanlineWarpParams{ 8.0f, 10, 0.70f, 0.70f },
+            OSDParams{},
+            LossDistributionParams{ LossProbabilityModel::constant, 0.40f, 0.0f },
+            LossRandomParams{ 1.0f, 0.01f, 1.20f },
+            LossSequenceParams{},
+            CutPresetParams{ 0, 12, 20.0f, 20000.0f, true }
         },
     };
 

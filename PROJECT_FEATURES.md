@@ -7,9 +7,9 @@
 - **公司**：iisaacbeats.cn
 - **JUCE 版本**：8.0.12
 - **插件格式**：VST3 + Standalone
-- **CMake 版本号**（`CMakeLists.txt` 中 `juce_add_plugin` 的 `VERSION`）：`1.1.8`
-- **UI 版本号**（`PluginEditor.cpp` 中 `kPluginUiVersionText`）：`v1.3.1`
-- **文档版本**：`0.0.3`
+- **CMake 版本号**（`CMakeLists.txt` 中 `juce_add_plugin` 的 `VERSION`）：`1.1.9`
+- **UI 版本号**（`PluginEditor.cpp` 中 `kPluginUiVersionText`）：`v1.4.0`
+- **文档版本**：`0.0.4`
 
 ---
 
@@ -222,7 +222,7 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 
 ### 5.7 版本水印（右下角）
 
-- 显示文本 `kPluginUiVersionText`（当前 `v1.3.1`）。
+- 显示文本 `kPluginUiVersionText`（当前 `v1.4.0`）。
 - 悬停时下划线 + 手型指针。
 - 单击 → `juce::URL("https://iisaacbeats.cn").launchInDefaultBrowser()`。
 
@@ -264,6 +264,7 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | 2026-07-09 | 0.0.1 | 1.1.6 | v1.3.0 | 建立首版功能与交互索引文档 |
 | 2026-07-09 | 0.0.2 | 1.1.7 | v1.3.1 | 新增第 3 种 Loss 算法 **FFT-Mask**（`kLossAlgorithmFftMask=2`）：STFT+Hann+75% overlap+OLA，逐 bin 乘 `g = 1 − wet(band(k))` 保留相位；`ST/SAP` 遥控按钮改为三态循环（Legacy → UniformBW → FFT-Mask → Legacy），左上模式 OSD 支持 `ST/SAP: LEGACY Q / UNIFORM BW / FFT MASK` 三种文案；FFT 模式下 `setLatencySamples(N−hop)=1536`，切回 IIR 模式清 0 |
 | 2026-07-09 | 0.0.3 | 1.1.8 | v1.3.1 | 修复 **Legacy / UniformBandwidth 两种 IIR 丢频算法在重触发时产生的"电流声 / 咕嗒声"**：引入 `previousLossMask` 快照，在 `retriggerLossMask` 末尾对"上一帧为保留 (1) 但当帧变为丢弃 (0)"的每一个 band 执行 `lossBandNotchL/R[b].reset()` + `lossBandWet[b] = 0.0f`，强制从零初始状态拉起；同时把 `kLossMaskSmoothingTimeSeconds` 从 10ms 拉长到 25ms，为低频段 Notch 留出建立稳态的时间；FFT-Mask 分支无 IIR 内部状态，不受影响 |
+| 2026-07-10 | 0.0.4 | 1.1.9 | v1.4.0 | **调整固定预设 0..11 的顺序**：`display_present::kPresets` 循环左移一位（旧 1..11 → 新 0..10，旧 0 → 新 11），且开机默认停留在新预设 0（原预设 1）。同时在 `PluginEditor.cpp::OscilloscopeComponent::paint()` 中把 `stylePreset` 的"固定频道路径"从 `= preset` 改为 `= mapToLegacyStyleIndex(preset)`（新 0..10→旧 1..11，新 11→旧 0），并把 `getWaveBaseColour()` 内的 `switch (preset)` 改为 `switch (stylePreset)`。使得**波形颜色 / 波形绘制样式 / glitch 撕裂效果**这三块硬编码视觉分支跟随数据一起从旧位置搬到新位置——数据（背景、扫描线扭曲、丢频算法、高低切）与外观（波形颜色、绘制样式、glitch）完全同步 |
 
 ### 7.2 踩坑记录
 
@@ -281,6 +282,10 @@ VOL 连发参数：`volumeRepeatInitialDelaySeconds=0.32`，`volumeRepeatInterva
 | DSP | wet 平滑 10ms 对低频段 Notch（群延迟本身就接近 10ms）“追不上"，即使 reset 也有残留尾巴 | 把 `kLossMaskSmoothingTimeSeconds` 从 0.010f 拉长到 0.025f（对扫频预设听感还不至于"发糊"） | 0.0.3 |
 | DSP | 如果对所有变化的 band 都 reset，会引入反方向（1→0）的二次咕嗒 | 仅对 previous=1∧current=0 （新变为丢弃）的方向做 reset；反方向 wet 从 1→0 接入量递减不会激发瞬态，且反方向 reset 会丢失滤波器自然收尾 | 0.0.3 |
 | 状态 | `prepareToPlay` / `releaseResources` 中若不同步 `previousLossMask` 初始化，首次 retrigger 会把全部 band 误判为"新丢弃" | 在两处都添加 `previousLossMask.fill(1)`，与 `lossMask.fill(1)` 对齐 | 0.0.3 |
+| UI | 只挪 `kPresets` 数组，视觉外观没跟着搬——切到新预设 0 时听感变了但屏幕上的波形颜色 / 绘制样式 / glitch 干扰仍停留在原位 | 根因：`PluginEditor.cpp` 里有 3 处硬编码 `switch` 按预设序号分派视觉效果（波形颜色 `switch (preset)`、波形样式 + 预设 0 雪花底 `switch (stylePreset)`、glitch 干扰 `switch (stylePreset)`）。解决：不动 3 处庞大的 switch 主体，只在 `stylePreset` 计算点做**新序号→旧序号映射**（`mapToLegacyStyleIndex`），一处映射全局同步；`getWaveBaseColour()` 内的 `switch (preset)` 顺手改为 `switch (stylePreset)` 保持一致 | 0.0.4 |
+| UI | 直接把 3 处 switch 全部按新顺序重排 case 分支的替代方案被否 | 改动面过大、极易破坏 case 3 的彩虹波形/OSD 手柄特判以及 `stylePreset`-related 的数值算式（如 `burstPeriod = 150 + stylePreset*17`），风险远高于收益。用重映射封装是最小改动且行为等价的方案 | 0.0.4 |
+| UI | 衍生频道 (channel ≥ 12) 也可能被误映射 | `mapToLegacyStyleIndex` 显式判断 `p < 0 || p >= kPresetCount` 时返回原值；且衍生频道走的是 `1 + (preset*7+5) % (kPresetCount-1)` 分支，本身就已经落在旧序号语义下，无需再映射 | 0.0.4 |
+| 兼容 | 旧工程加载后，保存的 `preset` 索引会指向新排序中的对应位置，听感与保存时不一致 | 已知取舍，属于"预设顺序调整"这类破坏性变更的正常后果；派生频道 (12..9999) 因基准索引 `cid % kPresetCount` 变化，声音也会与之前不同 | 0.0.4 |
 
 <!-- 后续每次开发结束后，在这里追加行。示例格式：
 | DSP | HPF/LPF 参数每帧微调导致电流感 | 引入 kCutCrossfadeRetuneHzEpsilon=18Hz 抖动阈值，避免频繁重启 crossfade | 0.0.x |

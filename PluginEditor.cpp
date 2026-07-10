@@ -6,7 +6,7 @@
 
 namespace
 {
-static constexpr auto kPluginUiVersionText = "v1.3.1";
+static constexpr auto kPluginUiVersionText = "v1.4.0";
 
     enum class TvPanelButtonAction
     {
@@ -401,7 +401,20 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
 
     const int preset = owner.getSelectedPresetIndex();
     const bool derivedChannel = (preset >= display_present::kPresetCount);
-    const int stylePreset = derivedChannel ? (1 + ((preset * 7 + 5) % (display_present::kPresetCount - 1))) : preset;
+
+    // 把当前顺序下的固定频道 index 映射回“旧序号”（数组挪动之前的编号），
+    // 这样所有按 stylePreset/preset 硬编码的视觉分派（波形颜色、波形样式、glitch 样式）
+    // 都能跟着 kPresets 数据一起从旧位置搬到新位置，视觉与数据保持一致。
+    // 规则：旧 1..11 → 新 0..10；旧 0 → 新 11。
+    auto mapToLegacyStyleIndex = [](int p) noexcept
+    {
+        if (p < 0 || p >= display_present::kPresetCount) return p;
+        return (p == display_present::kPresetCount - 1) ? 0 : (p + 1);
+    };
+
+    const int stylePreset = derivedChannel
+        ? (1 + ((preset * 7 + 5) % (display_present::kPresetCount - 1)))
+        : mapToLegacyStyleIndex(preset);
 
     const auto presetParams = display_present::getPresetParamsForChannel(preset);
 
@@ -413,7 +426,7 @@ void LDSJvstAudioProcessorEditor::OscilloscopeComponent::paint(juce::Graphics& g
                                           juce::jlimit(0.55f, 1.0f, presetParams.waveVal),
                                           1.0f);
 
-        switch (preset)
+        switch (stylePreset)
         {
             case 0:  return juce::Colour::fromRGB(0x39, 0xFF, 0x14);
             case 1:  return juce::Colour::fromRGB(0x3A, 0xE6, 0xFF);
@@ -2418,7 +2431,7 @@ void LDSJvstAudioProcessorEditor::toggleBypassFromUI()
     bypassTransitionToOn = next;
     bypassTransitionStartSeconds = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
-    processor.bypassed.store(next, std::memory_order_release);
+    processor.writeBypassFromUI(next);
 
     // 刷新触发区图片与屏幕
     bypassHitArea.repaint();

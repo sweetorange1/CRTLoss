@@ -23,7 +23,8 @@ LDSJvstAudioProcessor::LDSJvstAudioProcessor()
     activeLossBandCount = 0;
     lossRandom.setSeedRandomly();
 
-
+    // 注册宿主可自动化参数（生命周期由 AudioProcessor 拥有）
+    createAndRegisterHostParameters();
 }
 
 LDSJvstAudioProcessor::~LDSJvstAudioProcessor()
@@ -31,6 +32,246 @@ LDSJvstAudioProcessor::~LDSJvstAudioProcessor()
     isPrepared.store(false, std::memory_order_release);
     isShuttingDown.store(true, std::memory_order_release);
     nextLossRetriggerSeconds = std::numeric_limits<double>::infinity();
+
+    // 注销参数监听，避免宿主随后再触发回调时访问已析构成员
+    auto detach = [this](juce::AudioProcessorParameter* p)
+    {
+        if (p != nullptr)
+            p->removeListener(this);
+    };
+    detach(paramBypass);
+    detach(paramPreGainDb);
+    detach(paramLimiterThreshold);
+    detach(paramLowCutHz);
+    detach(paramHighCutHz);
+    detach(paramCutMode);
+    detach(paramCutSlope);
+    detach(paramLossAlgorithm);
+    detach(paramLossMaskInvert);
+}
+
+// ============================================================================
+//  宿主可自动化参数创建 & 双向同步
+// ============================================================================
+void LDSJvstAudioProcessor::createAndRegisterHostParameters()
+{
+    using AF = juce::AudioParameterFloat;
+    using AC = juce::AudioParameterChoice;
+    using AB = juce::AudioParameterBool;
+
+    // ---- Bypass ----
+    paramBypass = new AB(juce::ParameterID { "bypass", 1 }, "Bypass", false);
+    addParameter(paramBypass);
+    // 通过 override AudioProcessor::getBypassParameter() 让宿主把它识别成标准 Bypass
+
+    // ---- 前置增益 ----
+    paramPreGainDb = new AF(juce::ParameterID { "preGainDb", 1 },
+                            "Pre Gain",
+                            juce::NormalisableRange<float>(kPreGainDbMin, kPreGainDbMax, 0.01f),
+                            10.0f,
+                            juce::AudioParameterFloatAttributes().withLabel("dB"));
+    addParameter(paramPreGainDb);
+
+    // ---- 限制器阈值（线性） ----
+    paramLimiterThreshold = new AF(juce::ParameterID { "limiterThreshold", 1 },
+                                   "Limiter Threshold",
+                                   juce::NormalisableRange<float>(kLimiterThresholdMin, kLimiterThresholdMax, 0.0001f),
+                                   1.0f);
+    addParameter(paramLimiterThreshold);
+
+    // ---- 高低切频率（对数标度更符合听觉） ----
+    juce::NormalisableRange<float> lowRange(kLowCutHzMin, kLowCutHzMax, 0.01f);
+    lowRange.setSkewForCentre(500.0f);
+    paramLowCutHz = new AF(juce::ParameterID { "lowCutHz", 1 },
+                           "Low Cut",
+                           lowRange,
+                           kLowCutHzMin,
+                           juce::AudioParameterFloatAttributes().withLabel("Hz"));
+    addParameter(paramLowCutHz);
+
+    juce::NormalisableRange<float> highRange(kHighCutHzMin, kHighCutHzMax, 0.01f);
+    highRange.setSkewForCentre(2000.0f);
+    paramHighCutHz = new AF(juce::ParameterID { "highCutHz", 1 },
+                            "High Cut",
+                            highRange,
+                            kHighCutHzMax,
+                            juce::AudioParameterFloatAttributes().withLabel("Hz"));
+    addParameter(paramHighCutHz);
+
+    // ---- 高低切模式 & 斜率 ----
+    paramCutMode = new AC(juce::ParameterID { "cutMode", 1 },
+                          "Cut Mode",
+                          juce::StringArray { "Hard Mask", "HPF/LPF" },
+                          kCutModeHardMask);
+    addParameter(paramCutMode);
+
+    paramCutSlope = new AC(juce::ParameterID { "cutSlope", 1 },
+                           "Cut Slope",
+                           juce::StringArray { "12 dB/oct", "24 dB/oct", "48 dB/oct" },
+                           0);
+    addParameter(paramCutSlope);
+
+    // ---- Loss 陷波算法 ----
+    paramLossAlgorithm = new AC(juce::ParameterID { "lossAlgorithm", 1 },
+                                "Loss Algorithm",
+                                juce::StringArray { "Legacy Q", "Uniform BW", "FFT Mask" },
+                                kLossAlgorithmLegacy);
+    addParameter(paramLossAlgorithm);
+
+    // ---- 丢失掩码反转 ----
+    paramLossMaskInvert = new AB(juce::ParameterID { "lossMaskInvert", 1 },
+                                 "Loss Mask Invert",
+                                 false);
+    addParameter(paramLossMaskInvert);
+
+    // 附加监听器
+    auto attach = [this](juce::AudioProcessorParameter* p)
+    {
+        if (p != nullptr)
+            p->addListener(this);
+    };
+    attach(paramBypass);
+    attach(paramPreGainDb);
+    attach(paramLimiterThreshold);
+    attach(paramLowCutHz);
+    attach(paramHighCutHz);
+    attach(paramCutMode);
+    attach(paramCutSlope);
+    attach(paramLossAlgorithm);
+    attach(paramLossMaskInvert);
+
+    // 初始把 atomic 与参数默认值对齐一遍
+    syncAtomicFromParameter(paramBypass);
+    syncAtomicFromParameter(paramPreGainDb);
+    syncAtomicFromParameter(paramLimiterThreshold);
+    syncAtomicFromParameter(paramLowCutHz);
+    syncAtomicFromParameter(paramHighCutHz);
+    syncAtomicFromParameter(paramCutMode);
+    syncAtomicFromParameter(paramCutSlope);
+    syncAtomicFromParameter(paramLossAlgorithm);
+    syncAtomicFromParameter(paramLossMaskInvert);
+}
+
+void LDSJvstAudioProcessor::syncAtomicFromParameter(juce::AudioProcessorParameter* p)
+{
+    if (p == nullptr)
+        return;
+
+    if (p == paramBypass)
+    {
+        bypassed.store(paramBypass->get(), std::memory_order_release);
+    }
+    else if (p == paramPreGainDb)
+    {
+        preGainDb.store(juce::jlimit(kPreGainDbMin, kPreGainDbMax, paramPreGainDb->get()),
+                        std::memory_order_relaxed);
+    }
+    else if (p == paramLimiterThreshold)
+    {
+        limiterThreshold.store(juce::jlimit(kLimiterThresholdMin, kLimiterThresholdMax, paramLimiterThreshold->get()),
+                               std::memory_order_relaxed);
+    }
+    else if (p == paramLowCutHz)
+    {
+        // Low <= High 约束（若宿主自动化把 low 甩到 high 之上，也保证不越界）
+        const float hi = highCutHz.load(std::memory_order_relaxed);
+        const float clamped = juce::jlimit(kLowCutHzMin, juce::jmin(kLowCutHzMax, hi), paramLowCutHz->get());
+        lowCutHz.store(clamped, std::memory_order_relaxed);
+    }
+    else if (p == paramHighCutHz)
+    {
+        const float lo = lowCutHz.load(std::memory_order_relaxed);
+        const float clamped = juce::jlimit(juce::jmax(kHighCutHzMin, lo), kHighCutHzMax, paramHighCutHz->get());
+        highCutHz.store(clamped, std::memory_order_relaxed);
+    }
+    else if (p == paramCutMode)
+    {
+        const int idx = paramCutMode->getIndex();
+        cutMode.store(juce::jlimit(kCutModeHardMask, kCutModeHpfLpf, idx), std::memory_order_relaxed);
+    }
+    else if (p == paramCutSlope)
+    {
+        const int idx = paramCutSlope->getIndex();
+        int slope = kCutSlope12dB;
+        if (idx == 2) slope = kCutSlope48dB;
+        else if (idx == 1) slope = kCutSlope24dB;
+        cutSlopeDbPerOct.store(slope, std::memory_order_relaxed);
+    }
+    else if (p == paramLossAlgorithm)
+    {
+        const int idx = paramLossAlgorithm->getIndex();
+        lossAlgorithmMode.store(juce::jlimit(kLossAlgorithmLegacy, kLossAlgorithmFftMask, idx),
+                                std::memory_order_relaxed);
+    }
+    else if (p == paramLossMaskInvert)
+    {
+        lossMaskInverted.store(paramLossMaskInvert->get(), std::memory_order_release);
+    }
+}
+
+void LDSJvstAudioProcessor::parameterValueChanged(int /*parameterIndex*/, float /*newValue*/)
+{
+    // 参数只有 9 个，直接依次同步；成本可忽略且不需要按 index 判定
+    ++parameterCallbackDepth;
+    syncAtomicFromParameter(paramBypass);
+    syncAtomicFromParameter(paramPreGainDb);
+    syncAtomicFromParameter(paramLimiterThreshold);
+    syncAtomicFromParameter(paramLowCutHz);
+    syncAtomicFromParameter(paramHighCutHz);
+    syncAtomicFromParameter(paramCutMode);
+    syncAtomicFromParameter(paramCutSlope);
+    syncAtomicFromParameter(paramLossAlgorithm);
+    syncAtomicFromParameter(paramLossMaskInvert);
+    --parameterCallbackDepth;
+}
+
+void LDSJvstAudioProcessor::parameterGestureChanged(int, bool)
+{
+    // 不需要额外处理，宿主自己会把 gesture 边界录制成自动化端点
+}
+
+void LDSJvstAudioProcessor::writeFloatParamFromUI(juce::AudioParameterFloat* p, float newValue) noexcept
+{
+    if (p == nullptr)
+        return;
+
+    const auto& range = p->getNormalisableRange();
+    const float clamped = juce::jlimit(range.start, range.end, newValue);
+    const float norm = range.convertTo0to1(clamped);
+
+    // 注：这里刻意不使用 beginChangeGesture / endChangeGesture。
+    //  - UI 侧的 VOL± 连发 / 限制器拖拽 / 高低切三角拖拽是高频写入路径；
+    //  - 若每次都 begin/end，宿主会记录到大量 gesture 边界，反而不利于后续曲线编辑。
+    //  - 只用 setValueNotifyingHost 已足够让宿主感知变化并可录制自动化。
+    p->setValueNotifyingHost(norm);
+}
+
+void LDSJvstAudioProcessor::writeChoiceParamFromUI(juce::AudioParameterChoice* p, int newIndex) noexcept
+{
+    if (p == nullptr)
+        return;
+
+    const int numChoices = juce::jmax(1, p->choices.size());
+    const int clamped = juce::jlimit(0, numChoices - 1, newIndex);
+    const float norm = (numChoices > 1) ? ((float) clamped / (float) (numChoices - 1)) : 0.0f;
+
+    p->setValueNotifyingHost(norm);
+}
+
+void LDSJvstAudioProcessor::writeBoolParamFromUI(juce::AudioParameterBool* p, bool newValue) noexcept
+{
+    if (p == nullptr)
+        return;
+
+    p->setValueNotifyingHost(newValue ? 1.0f : 0.0f);
+}
+
+void LDSJvstAudioProcessor::writeBypassFromUI(bool newBypassed) noexcept
+{
+    if (paramBypass != nullptr)
+        writeBoolParamFromUI(paramBypass, newBypassed);
+    else
+        bypassed.store(newBypassed, std::memory_order_release);
 }
 
 
@@ -1173,6 +1414,11 @@ bool LDSJvstAudioProcessor::producesMidi() const { return false; }
 bool LDSJvstAudioProcessor::isMidiEffect() const { return false; }
 double LDSJvstAudioProcessor::getTailLengthSeconds() const { return 0.0; }
 
+juce::AudioProcessorParameter* LDSJvstAudioProcessor::getBypassParameter() const
+{
+    return paramBypass;
+}
+
 int LDSJvstAudioProcessor::getNumPrograms() { return 1; }
 int LDSJvstAudioProcessor::getCurrentProgram() { return 0; }
 void LDSJvstAudioProcessor::setCurrentProgram(int) {}
@@ -1225,21 +1471,52 @@ void LDSJvstAudioProcessor::setStateInformation(const void* data, int sizeInByte
         return;
 
     setDisplayPresetIndex((int) state.getProperty("preset", 0));
-    bypassed.store(((int) state.getProperty("bypassed", 0)) != 0, std::memory_order_relaxed);
 
-    setPreGainDb((float) (double) state.getProperty("preGainDb", 10.0));
+    // ---- 通过参数写入的字段（宿主/UI 自动化路径统一） ----
+    // 用一次 setValueNotifyingHost 让参数、atomic、宿主端 UI 三者一次性对齐。
+    auto restoreFloat = [](juce::AudioParameterFloat* p, double val)
+    {
+        if (p == nullptr) return;
+        const auto& range = p->getNormalisableRange();
+        const float clamped = juce::jlimit(range.start, range.end, (float) val);
+        p->setValueNotifyingHost(range.convertTo0to1(clamped));
+    };
+    auto restoreChoice = [](juce::AudioParameterChoice* p, int idx)
+    {
+        if (p == nullptr) return;
+        const int n = juce::jmax(1, p->choices.size());
+        const int clamped = juce::jlimit(0, n - 1, idx);
+        const float norm = (n > 1) ? ((float) clamped / (float) (n - 1)) : 0.0f;
+        p->setValueNotifyingHost(norm);
+    };
+    auto restoreBool = [](juce::AudioParameterBool* p, bool val)
+    {
+        if (p == nullptr) return;
+        p->setValueNotifyingHost(val ? 1.0f : 0.0f);
+    };
+
+    restoreBool (paramBypass,           ((int) state.getProperty("bypassed", 0)) != 0);
+    restoreFloat(paramPreGainDb,        (double) state.getProperty("preGainDb", 10.0));
+    // randomRetriggerPerBeat 未暴露为宿主参数，直接沿用旧接口
     setRandomRetriggerPerBeat((float) (double) state.getProperty("randomRetriggerPerBeat", 4.0));
-    setLimiterThreshold((float) (double) state.getProperty("limiterThreshold", 1.0));
+    restoreFloat(paramLimiterThreshold, (double) state.getProperty("limiterThreshold", 1.0));
+    // lossNotchQ 未暴露为宿主参数，沿用旧接口
     setLossNotchQ((float) (double) state.getProperty("lossNotchQ", 11.0));
-    setLossAlgorithmMode((int) state.getProperty("lossAlgorithmMode", kLossAlgorithmLegacy));
-    setLossMaskInverted(((int) state.getProperty("lossMaskInverted", 0)) != 0);
+    restoreChoice(paramLossAlgorithm,  (int) state.getProperty("lossAlgorithmMode", kLossAlgorithmLegacy));
+    restoreBool(paramLossMaskInvert,   ((int) state.getProperty("lossMaskInverted", 0)) != 0);
 
-    const float restoredLowCutHz = (float) (double) state.getProperty("lowCutHz", (double) kLowCutHzMin);
+    const float restoredLowCutHz  = (float) (double) state.getProperty("lowCutHz",  (double) kLowCutHzMin);
     const float restoredHighCutHz = (float) (double) state.getProperty("highCutHz", (double) kHighCutHzMax);
-    setLowCutHz(restoredLowCutHz);
-    setHighCutHz(restoredHighCutHz);
-    setCutMode((int) state.getProperty("cutMode", kCutModeHardMask));
-    setCutSlopeDbPerOct((int) state.getProperty("cutSlopeDbPerOct", kCutSlope12dB));
+    // 先高后低，避免 low > high 时被互相钳位
+    restoreFloat(paramHighCutHz, restoredHighCutHz);
+    restoreFloat(paramLowCutHz,  restoredLowCutHz);
+
+    restoreChoice(paramCutMode,  (int) state.getProperty("cutMode", kCutModeHardMask));
+    const int slopeVal = (int) state.getProperty("cutSlopeDbPerOct", kCutSlope12dB);
+    const int slopeIdx = (slopeVal >= kCutSlope48dB) ? 2
+                       : (slopeVal >= kCutSlope24dB) ? 1 : 0;
+    restoreChoice(paramCutSlope, slopeIdx);
+
     currentLowCutHzForMask = getLowCutHz();
     currentHighCutHzForMask = getHighCutHz();
     currentCutModeForMask = getCutMode();

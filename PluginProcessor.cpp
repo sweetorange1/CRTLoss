@@ -2,9 +2,34 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "display_present.h"
+#include "source/network/UpdateChecker.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
+
+// 平台标识（与遥测口径一致，<os>-<arch>）
+static juce::String GetUpdatePlatformString()
+{
+#if defined(_M_ARM64) || defined(_M_ARM64EC) || defined(__aarch64__) || defined(__arm64__)
+    const juce::String arch = "arm64";
+#elif defined(_M_X64) || defined(__x86_64__) || defined(__amd64__)
+    const juce::String arch = "x64";
+#else
+    const juce::String arch = "x86";
+#endif
+
+#if JUCE_WINDOWS
+    return "win-" + arch;
+#elif JUCE_MAC
+    return "mac-" + arch;
+#elif JUCE_LINUX
+    return "linux-" + arch;
+#else
+    juce::ignoreUnused (arch);
+    return "unknown";
+#endif
+}
 
 LDSJvstAudioProcessor::LDSJvstAudioProcessor()
     : juce::AudioProcessor (BusesProperties()
@@ -25,6 +50,22 @@ LDSJvstAudioProcessor::LDSJvstAudioProcessor()
 
     // 注册宿主可自动化参数（生命周期由 AudioProcessor 拥有）
     createAndRegisterHostParameters();
+
+    // 启动时延迟 5 秒检查一次更新（进程级去重，避免多实例重复触发）
+    static std::atomic<bool> updateOnceFlag{false};
+    if (!updateOnceFlag.exchange(true, std::memory_order_acquire)) {
+        juce::Timer::callAfterDelay(5000, [] {
+            crtloss::network::CheckForUpdatesAsync(
+                "crtloss",
+                juce::String(JucePlugin_VersionString),
+                GetUpdatePlatformString(),
+                [](const crtloss::network::UpdateInfo& info) {
+                    if (info.has_update) {
+                        crtloss::network::ShowUpdateDialog(info);
+                    }
+                });
+        });
+    }
 }
 
 LDSJvstAudioProcessor::~LDSJvstAudioProcessor()

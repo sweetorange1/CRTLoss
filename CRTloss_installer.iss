@@ -1,10 +1,17 @@
 #define MyAppName "CRTloss"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "1.5.0"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyPluginBundle "CRTloss.vst3"
 
+; VST3 顶层目录（即包含 CRTloss.vst3 bundle 的父目录）。
+; 默认指向 Visual Studio / CLion 的 Release 构建目录；
+; build_installer.bat 会用 -DVST3_DIR 覆盖为实际探测到的路径。
+#ifndef VST3_DIR
+  #define VST3_DIR "cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3"
+#endif
+
 [Setup]
-AppId={{9D34E6D9-A3C4-4C92-83F1-36A3A410AB9A}
+AppId={{C4E17B2A-6D58-4F31-9A72-5B0E83D6F241}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
@@ -27,9 +34,7 @@ DisableDirPage=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-; Release 构建产物目录（对应 CLion Release profile: cmake-build-release-visual-studio）
-; 需先在 CLion 中以 Release 配置构建 LDSJvst_VST3 目标
-Source: "cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#VST3_DIR}\{#MyPluginBundle}\*"; DestDir: "{app}\{#MyPluginBundle}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Code]
 var

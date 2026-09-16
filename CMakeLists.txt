@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(LDSJvst VERSION 1.0.0 LANGUAGES C CXX)
+project(LDSJvst VERSION 1.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,7 +18,7 @@ add_subdirectory(grid_plugin)
 juce_add_plugin(
         LDSJvst
         PRODUCT_NAME "CRTloss"
-VERSION 1.1.9
+        VERSION 1.5.0
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Ldsj
         PLUGIN_CODE Ldsj
@@ -28,6 +28,7 @@ VERSION 1.1.9
         NEEDS_MIDI_OUTPUT FALSE
         VST3_AUTO_MANIFEST FALSE
         COPY_PLUGIN_AFTER_BUILD TRUE
+        NEEDS_CURL TRUE
 )
 
 juce_generate_juce_header(LDSJvst)
@@ -44,6 +45,8 @@ juce_add_binary_data(
 target_compile_definitions(LDSJvst
   PUBLIC
     JUCE_VST3_CAN_REPLACE_VST2=0
+    # https 请求（遥测 / 更新检查）依赖 CURL 后端，关闭会静默失败
+    JUCE_USE_CURL=1
 )
 
 target_sources(LDSJvst PRIVATE
@@ -51,6 +54,13 @@ target_sources(LDSJvst PRIVATE
   PluginProcessor.h
   PluginEditor.cpp
   PluginEditor.h
+  shared/IisaacTelemetry.h
+  source/network/Version.h
+  source/network/Version.cpp
+  source/network/UpdateChecker.h
+  source/network/UpdateChecker.cpp
+  source/ui/UpdateDialog.h
+  source/ui/UpdateDialog.cpp
 )
 
 target_link_libraries(LDSJvst PRIVATE grid::grid_plugin juce::juce_audio_utils juce::juce_dsp LDSJvst_BinaryData)

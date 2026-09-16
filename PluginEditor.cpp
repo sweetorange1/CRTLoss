@@ -2,11 +2,12 @@
 #include <JuceHeader.h>
 #include "BinaryData.h"
 #include "display_present.h"
+#include "shared/IisaacTelemetry.h"
 #include <cstring>
 
 namespace
 {
-static constexpr auto kPluginUiVersionText = "v1.4.4";
+static constexpr auto kPluginUiVersionText = "v1.5.0";
 
     enum class TvPanelButtonAction
     {
@@ -2474,11 +2475,19 @@ LDSJvstAudioProcessorEditor::LDSJvstAudioProcessorEditor(LDSJvstAudioProcessor& 
     for (auto* light : presetLights)
         if (light != nullptr)
             light->repaint();
+
+    // GUI 构造完成后才启动遥测（每日至多一次 ping，失败静默）
+    telemetrySession = std::make_unique<iisaac::telemetry::Session>(
+        iisaac::telemetry::forPlugin("crtloss", JucePlugin_VersionString,
+                                     JucePlugin_VersionString, processor.wrapperType));
 }
 
 LDSJvstAudioProcessorEditor::~LDSJvstAudioProcessorEditor()
 {
     editorShuttingDown = true;
+
+    // 先收遥测：Session 析构要在消息线程等待工作线程退出。
+    telemetrySession.reset();
 
     oscilloscope.shutdownForEditorTeardown();
     remoteOverlay.shutdownForEditorTeardown();

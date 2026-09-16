@@ -68,7 +68,7 @@ if [[ ! -f "$EDITOR_CPP" ]]; then
   echo "[ERROR] 未找到 PluginEditor.cpp: $EDITOR_CPP"
   exit 1
 fi
-# 匹配形如：static constexpr auto kPluginUiVersionText = "v1.4.4";
+# 匹配形如：static constexpr auto kPluginUiVersionText = "v1.5.0";
 RAW_VER="$(grep -Eo 'kPluginUiVersionText[[:space:]]*=[[:space:]]*"v[0-9]+\.[0-9]+\.[0-9]+"' "$EDITOR_CPP" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
 if [[ -z "$RAW_VER" ]]; then
   echo "[ERROR] 无法从 PluginEditor.cpp 提取版本号（kPluginUiVersionText 未匹配到 vX.Y.Z 格式）"

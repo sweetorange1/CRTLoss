@@ -2,8 +2,11 @@
 
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
+#include <memory>
 #include <vector>
 #include <deque>
+
+namespace iisaac::telemetry { class Session; }
 
 class LDSJvstAudioProcessorEditor : public juce::AudioProcessorEditor
 {
@@ -267,6 +270,9 @@ private:
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OscilloscopeComponent)
     };
+
+    // 匿名遥测：GUI 创建完成后才持有，构造/析构都在消息线程。
+    std::unique_ptr<iisaac::telemetry::Session> telemetrySession;
 
     LDSJvstAudioProcessor& processor;
     OscilloscopeComponent oscilloscope;

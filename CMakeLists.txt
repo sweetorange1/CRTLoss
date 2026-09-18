@@ -1,4 +1,15 @@
 cmake_minimum_required(VERSION 3.22)
+
+# macOS：默认构建 Universal 2 二进制（arm64 + x86_64），同一个 bundle 同时支持
+# Apple Silicon 与 Intel。必须在 project() 之前设置才会被 CMake 用于编译器配置。
+# 需要单架构时用 -DCMAKE_OSX_ARCHITECTURES=arm64 覆盖即可（Windows / Linux 下此设置被忽略）。
+if (NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
+endif()
+if (NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13")
+endif()
+
 project(LDSJvst VERSION 1.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)

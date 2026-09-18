@@ -9,16 +9,19 @@
 #   1) 本脚本**不触碰编译**。编译由 CLion / cmake 负责。
 #   2) 本脚本只做三件事：
 #        a. 校验 Release 版 VST3 + AU 产物是否存在
-#        b. 用 pkgbuild 分别打两个组件 pkg
-#        c. 用 productbuild 合成一个用户可见的安装器 .pkg
-#        d. （可选）用 hdiutil 生成一个 .dmg 磁盘映像
+#        b. 校验产物为 Universal 二进制（同时含 arm64 与 x86_64）
+#        c. 用 pkgbuild 分别打两个组件 pkg
+#        d. 用 productbuild 合成一个用户可见的安装器 .pkg
+#        e. （可选）用 hdiutil 生成一个 .dmg 磁盘映像
 #   3) 版本号从 PluginEditor.cpp 的 kPluginUiVersionText 自动读取（去掉前缀 "v"），
 #      与 Windows iss 的 MyAppVersion 语义保持一致。
 #
 # 前置条件：
 #   * 已在 CLion 中以 Release 配置构建 LDSJvst_VST3 与 LDSJvst_AU 目标
+#   * CMake 已配置 CMAKE_OSX_ARCHITECTURES="arm64;x86_64"（仓库 CMakeLists.txt 已默认设置），
+#     若已有旧的 cmake-build-release 缓存，需删掉该目录重新 configure 才会生效
 #   * 产物目录：cmake-build-release/LDSJvst_artefacts/Release/{VST3,AU}
-#   * macOS 自带 pkgbuild / productbuild / hdiutil，无需额外安装
+#   * macOS 自带 pkgbuild / productbuild / hdiutil / lipo，无需额外安装
 #
 # 输出目录：dist/
 #   * CRTloss_Setup_<ver>_macOS.pkg     ← 双击即可安装
@@ -91,6 +94,39 @@ fi
 echo "[INFO] VST3 源: $VST3_SRC"
 echo "[INFO] AU   源: $AU_SRC"
 
+# ---------- 2.5) 校验产物是 arm64 + x86_64 通用二进制 ----------
+# 只打通用包：单架构产物（例如只编了 arm64）必须在这里拦下，避免误分发。
+check_universal() {
+  local label="$1"
+  local bundle="$2"
+  local bin="$bundle/Contents/MacOS/${APP_NAME}"
+
+  if [[ ! -f "$bin" ]]; then
+    echo "[ERROR] 在 ${bundle} 中未找到可执行文件 Contents/MacOS/${APP_NAME}"
+    exit 1
+  fi
+
+  local archs
+  archs="$(lipo -archs "$bin" 2>/dev/null || true)"
+  if [[ -z "$archs" ]]; then
+    echo "[ERROR] 无法用 lipo 读取 ${label} 的架构信息: $bin"
+    exit 1
+  fi
+
+  echo "[INFO] ${label} 架构: ${archs}"
+  if [[ "$archs" != *arm64* || "$archs" != *x86_64* ]]; then
+    echo "[ERROR] ${label} 不是 Universal 二进制（需同时包含 arm64 与 x86_64，当前: ${archs}）"
+    echo "        请删除构建缓存后重新 configure + 完整重编："
+    echo "        rm -rf cmake-build-release"
+    echo "        cmake -B cmake-build-release -DCMAKE_BUILD_TYPE=Release"
+    echo "        cmake --build cmake-build-release --config Release --target LDSJvst_VST3 LDSJvst_AU"
+    exit 1
+  fi
+}
+
+check_universal "VST3" "$VST3_SRC"
+check_universal "AU"   "$AU_SRC"
+
 # ---------- 3) 准备目录 ----------
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR/vst3_root/Library/Audio/Plug-Ins/VST3"
@@ -158,6 +194,8 @@ cat > "$STAGING_DIR/resources/welcome.txt" <<TXT
 CRTloss ${APP_VERSION}
 
 一个模拟老式 CRT 电视机外观的丢频音频效果器。
+
+通用二进制（Universal）：同时支持 Apple Silicon (arm64) 与 Intel (x86_64) Mac。
 
 本安装器将为您安装两种格式的插件（可在下一步自定义勾选）：
 

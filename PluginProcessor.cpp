@@ -8,6 +8,19 @@
 #include <cmath>
 #include <limits>
 
+// [测试用] 覆盖上报给更新服务器的版本号。
+//   留空 ""  → 上报真实版本 JucePlugin_VersionString
+//   填 "1.0.0" 之类低于服务端最新版的号 → 服务端判定 has_update=true，用于测试更新弹窗
+// 测完请改回 ""。仅影响更新检查请求，不影响打包版本与 UI 水印。
+static constexpr const char* kUpdateCheckVersionOverride = "";
+
+static juce::String GetUpdateCheckVersion()
+{
+    return (kUpdateCheckVersionOverride != nullptr && kUpdateCheckVersionOverride[0] != '\0')
+               ? juce::String(kUpdateCheckVersionOverride)
+               : juce::String(JucePlugin_VersionString);
+}
+
 // 平台标识（与遥测口径一致，<os>-<arch>）
 static juce::String GetUpdatePlatformString()
 {
@@ -57,7 +70,7 @@ LDSJvstAudioProcessor::LDSJvstAudioProcessor()
         juce::Timer::callAfterDelay(5000, [] {
             crtloss::network::CheckForUpdatesAsync(
                 "crtloss",
-                juce::String(JucePlugin_VersionString),
+                GetUpdateCheckVersion(),
                 GetUpdatePlatformString(),
                 [](const crtloss::network::UpdateInfo& info) {
                     if (info.has_update) {

@@ -31,7 +31,11 @@ if not exist "%ISS_FILE%" (
 REM ---------- 1) 自动探测 VST3 顶层目录（包含 CRTloss.vst3 bundle 的父目录）----------
 set "VST3_DIR="
 
-if exist "%SCRIPT_DIR%cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3\CRTloss.vst3" (
+if exist "%SCRIPT_DIR%build\msvc\LDSJvst_artefacts\Release\VST3\CRTloss.vst3\Contents\x86_64-win\CRTloss.vst3" (
+  set "VST3_DIR=%SCRIPT_DIR%build\msvc\LDSJvst_artefacts\Release\VST3"
+)
+
+if not defined VST3_DIR if exist "%SCRIPT_DIR%cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3\CRTloss.vst3" (
   set "VST3_DIR=%SCRIPT_DIR%cmake-build-release-visual-studio\LDSJvst_artefacts\Release\VST3"
 )
 
@@ -70,12 +74,10 @@ echo [INFO] 编译器:   "%ISCC_PATH%"
 echo [INFO] 安装脚本: "%ISS_FILE%"
 echo [INFO] VST3 产物: "%VST3_DIR%"
 
-set "ISCC_EXTRA_FLAGS=-DVST3_DIR=%VST3_DIR%"
-
 echo [INFO] 开始打包 ...
 echo ------------------------------------------------------------
 
-"%ISCC_PATH%" %ISCC_EXTRA_FLAGS% "%ISS_FILE%"
+"%ISCC_PATH%" /DVST3_DIR="%VST3_DIR%" "%ISS_FILE%"
 
 if errorlevel 1 (
   echo ------------------------------------------------------------

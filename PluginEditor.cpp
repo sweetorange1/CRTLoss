@@ -2792,7 +2792,7 @@ juce::String LDSJvstAudioProcessorEditor::getChannelOsdText() noexcept
     {
         const double idleSec = now - pendingChannelLastInputSeconds;
 
-        // 3秒不输入：提交当前频道
+        // 超时未输入：提交当前频道
         if (idleSec >= channelInputTimeoutSeconds)
             triggerChannelJumpNow();
         else
@@ -3395,7 +3395,7 @@ void LDSJvstAudioProcessorEditor::RemoteControlOverlay::mouseUp (const juce::Mou
             {
                 owner.recallPreviousChannelFromUI();
             }
-            // 数字键：输入频道（最多4位；3秒不输入自动跳转）
+            // 数字键：输入频道（最多4位；超时未输入自动跳转）
             else
 
             {

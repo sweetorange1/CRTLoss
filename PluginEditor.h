@@ -411,7 +411,8 @@ private:
     double channelOsdStartSeconds = 0.0;
 
     static constexpr int kMaxChannelDigits = 4;
-    static constexpr double channelInputTimeoutSeconds = 3.0;
+    // 数字键输入停顿多久后自动跳转电视台（原 3.0 秒等待过长）
+    static constexpr double channelInputTimeoutSeconds = 1.0;
     static constexpr double channelInputOsdDurationSeconds = 1.2;
     static constexpr double presetChannelOsdDurationSeconds = 3.0;
     double channelOsdCurrentDurationSeconds = channelInputOsdDurationSeconds;

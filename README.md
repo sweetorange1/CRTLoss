@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.5.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.5.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%20%2F%20macOS-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/framework-JUCE%208.0.12-orange" alt="JUCE">
 </p>
@@ -119,13 +119,13 @@ cmake --build cmake-build-release --config Release
 ```bash
 # Windows —— 需要先安装 Inno Setup 6 / Requires Inno Setup 6
 build_installer.bat
-# 产物 Output：dist\CRTloss_Setup_1.5.0_x64.exe
+# 产物 Output：dist\CRTloss_Setup_1.5.1_x64.exe
 
 # macOS —— 需先用 Release 构建 VST3 + AU 目标
 chmod +x build_installer_mac.sh
 ./build_installer_mac.sh          # pkg + dmg
 ./build_installer_mac.sh --no-dmg # 仅 pkg only
-# 产物 Output：dist\CRTloss_Setup_1.5.0_macOS.pkg / .dmg
+# 产物 Output：dist\CRTloss_Setup_1.5.1_macOS.pkg / .dmg
 ```
 
 Windows 安装器将 VST3 装入系统目录 `C:\Program Files\Common Files\VST3\iisaacbeats.cn`（需管理员权限）；若改选其他目录，安装完成后请在 DAW 中手动添加该目录并重新扫描插件。

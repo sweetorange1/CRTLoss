@@ -3,8 +3,8 @@ setlocal
 
 REM ============================================================
 REM  CRTloss - Windows Release Installer Builder
-REM  Version : 1.5.0
-REM  Output  : dist\CRTloss_Setup_1.5.0_x64.exe
+REM  Version : 1.5.1
+REM  Output  : dist\CRTloss_Setup_1.5.1_x64.exe
 REM
 REM  设计原则（KISS）：本脚本不触碰编译。
 REM    1) 校验 Release 版 VST3 产物是否存在（自动探测多个构建目录）
@@ -13,7 +13,7 @@ REM    3) 调用 ISCC 打包，产物输出到 dist\
 REM ============================================================
 
 set "APP_NAME=CRTloss"
-set "APP_VERSION=1.5.0"
+set "APP_VERSION=1.5.1"
 set "SCRIPT_DIR=%~dp0"
 set "ISS_FILE=%SCRIPT_DIR%CRTloss_installer.iss"
 set "DIST_DIR=%SCRIPT_DIR%dist"

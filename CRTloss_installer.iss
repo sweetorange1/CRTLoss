@@ -1,5 +1,5 @@
 #define MyAppName "CRTloss"
-#define MyAppVersion "1.5.0"
+#define MyAppVersion "1.5.1"
 #define MyAppPublisher "iisaacbeats.cn"
 #define MyPluginBundle "CRTloss.vst3"
 

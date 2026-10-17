@@ -10,7 +10,7 @@ if (NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13")
 endif()
 
-project(LDSJvst VERSION 1.5.0 LANGUAGES C CXX)
+project(LDSJvst VERSION 1.5.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,7 +29,7 @@ add_subdirectory(grid_plugin)
 juce_add_plugin(
         LDSJvst
         PRODUCT_NAME "CRTloss"
-        VERSION 1.5.0
+        VERSION 1.5.1
         COMPANY_NAME "iisaacbeats.cn"
         PLUGIN_MANUFACTURER_CODE Ldsj
         PLUGIN_CODE Ldsj

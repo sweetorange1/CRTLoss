@@ -7,7 +7,7 @@
 
 namespace
 {
-static constexpr auto kPluginUiVersionText = "v1.5.0";
+static constexpr auto kPluginUiVersionText = "v1.5.1";
 
     enum class TvPanelButtonAction
     {
@@ -2918,9 +2918,6 @@ void LDSJvstAudioProcessorEditor::resized()
     tvOverlay.setBounds(getLocalBounds());
     tvOverlay.toFront(false);
 
-    remoteOverlay.setBounds(getLocalBounds());
-    remoteOverlay.toFront(false);
-
     const int lightSize = juce::jmax(2, juce::roundToInt(presetLightSize * scale));
     const int lightX = juce::roundToInt(presetLightX * scale);
     const int lightY0 = juce::roundToInt(presetLightY * scale);
@@ -2962,6 +2959,12 @@ void LDSJvstAudioProcessorEditor::resized()
 
     if (resizableCorner != nullptr)
         resizableCorner->toFront(false);
+
+    // 遥控器 overlay 必须始终最后置顶：否则“拿出遥控器后调整窗口大小”时，
+    // 上面这段指示灯 / bypass / 缩放角的 toFront 会把遥控器图层压到下面，导致图层混乱。
+    // remoteOverlay 未拿出时 hitTest 只在遥控器区域命中，透明区域点击会穿透，不影响其它控件交互。
+    remoteOverlay.setBounds(getLocalBounds());
+    remoteOverlay.toFront(false);
 }
 
 void LDSJvstAudioProcessorEditor::setRemotePulledOut (bool shouldBePulledOut)

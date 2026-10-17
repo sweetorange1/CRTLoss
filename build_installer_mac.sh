@@ -19,8 +19,8 @@
 # 前置条件：
 #   * 已在 CLion 中以 Release 配置构建 LDSJvst_VST3 与 LDSJvst_AU 目标
 #   * CMake 已配置 CMAKE_OSX_ARCHITECTURES="arm64;x86_64"（仓库 CMakeLists.txt 已默认设置），
-#     若已有旧的 cmake-build-release 缓存，需删掉该目录重新 configure 才会生效
-#   * 产物目录：cmake-build-release/LDSJvst_artefacts/Release/{VST3,AU}
+#     若已有旧的 build 缓存，需删掉该目录重新 configure 才会生效
+#   * 产物目录：build/LDSJvst_artefacts/Release/{VST3,AU}
 #   * macOS 自带 pkgbuild / productbuild / hdiutil / lipo，无需额外安装
 #
 # 输出目录：dist/
@@ -37,7 +37,7 @@ set -euo pipefail
 
 # ---------- 路径与常量 ----------
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-BUILD_DIR="${SCRIPT_DIR}/cmake-build-release/LDSJvst_artefacts/Release"
+BUILD_DIR="${SCRIPT_DIR}/build/LDSJvst_artefacts/Release"
 VST3_SRC="${BUILD_DIR}/VST3/CRTloss.vst3"
 AU_SRC="${BUILD_DIR}/AU/CRTloss.component"
 
@@ -117,9 +117,9 @@ check_universal() {
   if [[ "$archs" != *arm64* || "$archs" != *x86_64* ]]; then
     echo "[ERROR] ${label} 不是 Universal 二进制（需同时包含 arm64 与 x86_64，当前: ${archs}）"
     echo "        请删除构建缓存后重新 configure + 完整重编："
-    echo "        rm -rf cmake-build-release"
-    echo "        cmake -B cmake-build-release -DCMAKE_BUILD_TYPE=Release"
-    echo "        cmake --build cmake-build-release --config Release --target LDSJvst_VST3 LDSJvst_AU"
+    echo "        rm -rf build"
+    echo "        cmake -B build -DCMAKE_BUILD_TYPE=Release"
+    echo "        cmake --build build --config Release --target LDSJvst_VST3 LDSJvst_AU"
     exit 1
   fi
 }
